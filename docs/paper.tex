@@ -1,0 +1,822 @@
+%% ACM Workshop Paper Template
+%% Clinical Domain Pre-training vs. General Instruction-Tuning
+%% Compiled with: pdflatex paper.tex; bibtex paper; pdflatex paper.tex; pdflatex paper.tex
+
+\documentclass[sigconf,anonymous=false,review=false]{acmart}
+
+%% Remove ACM-specific copyright block for course submission
+\setcopyright{none}
+\acmConference[Course Paper]{Graduate Seminar: AI in Healthcare}{2026}{University}
+\acmYear{2026}
+
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xspace}
+\usepackage[utf8]{inputenc}
+
+%% Convenience macros
+\newcommand{\medgemma}{MedGemma-4B-IT\xspace}
+\newcommand{\gemma}{Gemma-3-4B-IT\xspace}
+\newcommand{\pval}[1]{$p{=}{#1}$}
+\newcommand{\sig}{$p{<}0.001$}
+
+% -----------------------------------------------------------------------
+\begin{document}
+
+\title{Vendor Specialization Claims at 4B:\\ A Controlled Comparison of MedGemma and Gemma-3\\ on MIMIC-III MICU Nursing Tasks}
+
+\author{Anonymous}
+\email{anonymous@university.edu}
+\affiliation{\institution{University}}
+
+\begin{abstract}
+Large language models (LLMs) marketed as pre-trained on clinical corpora are
+widely assumed to outperform general-purpose models on clinical natural language
+processing (NLP) tasks. We test this vendor claim directly for a single
+4-billion-parameter checkpoint pair, comparing
+\medgemma (Google's clinically pre-trained model) against
+\gemma, a general instruction-tuned model of identical size and architecture,
+on three MICU nursing tasks drawn from MIMIC-III: structured nursing note
+generation (Sub-task~1), abnormal vital sign identification (Sub-task~2), and
+admission summary generation (Sub-task~3). Using one record per unique hospital
+admission ($n = 637$ independent records) and 13 evaluation metrics, the
+clinically marketed checkpoint provides no consistent advantage. \gemma matches
+or outperforms \medgemma on the majority of metrics, including abnormal value
+recall ($\Delta = +0.119$, $p < 0.001$), AARP document structure
+($\Delta = +0.024$, $p < 0.001$), and named mention of out-of-range metrics
+in free-form summaries ($\Delta = +0.079$, $p < 0.001$). We caution that the
+two checkpoints differ in alignment recipe as well as pre-training corpus, so
+these results falsify the vendor's specialization claim for this checkpoint
+pair without identifying the pre-training corpus as the causal driver. We
+report the result as null-to-negative and hypothesise that, at 4B parameters,
+instruction-following quality dominates domain vocabulary as a determinant of
+structured clinical generation performance.
+\end{abstract}
+
+\keywords{clinical NLP, large language models, nursing documentation, MIMIC-III,
+domain pre-training, benchmarking}
+
+\maketitle
+
+% -----------------------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+
+The deployment of artificial intelligence in clinical settings has been
+accompanied by a pervasive marketing claim: that models pre-trained on medical
+literature, clinical notes, and biomedical ontologies will outperform
+general-purpose models on clinical language tasks. This framing is intuitively
+appealing, since a clinician trained on medical texts should know more
+medicine than a generalist, and it has driven considerable research effort in
+domain-specific pre-training pipelines for healthcare NLP
+\cite{lee2020biobert,singhal2023large}.
+
+The practical consequence is that ``clinical pre-training'' on a model card
+risks functioning as a credibility signal that outweighs empirical evidence
+from the institution's own patient population and workflow when health systems
+evaluate LLMs for clinical decision support or automated documentation.
+
+We argue that this signal deserves controlled scrutiny on the specific
+checkpoints health systems are likely to consider. Nursing documentation in
+the intensive care unit is a stress-test where domain knowledge should matter
+most: notes are highly structured (vital signs, medications, active problems,
+assessments), grounded in observable measurements, and subject to clinical
+accuracy requirements. If a vendor's clinically marketed checkpoint cannot
+provide a measurable advantage here, the vendor's specialization claim
+requires revision for that checkpoint.
+
+This paper provides exactly that test for one checkpoint pair. We compare
+\medgemma \cite{medgemma2024} (Google's 4B-parameter model marketed as
+pre-trained on clinical and biomedical corpora) against \gemma
+\cite{gemmateam2025gemma3}, a general instruction-tuned model of identical
+size and architecture, on three tasks derived from MIMIC-III
+\cite{johnson2016mimic} MICU nursing records. We emphasise that the two
+checkpoints differ not only in pre-training corpus but also in alignment
+recipe, instruction-tuning data, and possibly base-model snapshot; our design
+therefore falsifies the vendor's specialization claim for this pair without
+identifying the pre-training corpus as the sole causal driver. To eliminate
+within-admission correlation, we sample one record per unique hospital
+admission ($n = 637$ independent admission records):
+
+\begin{enumerate}
+  \item \textbf{Sub-task~1}: Generate a structured MICU nursing note in
+    Assessment/Action/Response/Plan (AARP) format from 12~hours of structured
+    EHR context.
+  \item \textbf{Sub-task~2}: Identify abnormal vital signs and laboratory
+    values from recent observations.
+  \item \textbf{Sub-task~3}: Generate a free-form prose admission summary
+    comparable to a hospital course narrative.
+\end{enumerate}
+
+Our results are unambiguous: \medgemma does not consistently outperform
+\gemma. After reclassifying near-floor metrics with trivial absolute
+differences as draws (Section~\ref{sec:results}), the general model is the
+better performer on the majority of significant metrics. We report this as
+an explicit null-to-negative result for this checkpoint pair and argue it
+has direct implications for how healthcare organisations interpret vendor
+specialization claims when evaluating 4B-parameter LLMs for clinical NLP
+applications.
+
+% -----------------------------------------------------------------------
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Clinical pre-training benchmarks.}
+\citet{lee2020biobert} demonstrated that BERT models pre-trained on PubMed
+abstracts and clinical notes (BioBERT) improved named entity recognition
+and relation extraction on biomedical benchmark datasets. However, these gains
+were measured on tasks where training and test distributions closely matched
+the pre-training corpus. Subsequent work by \citet{alsentzer2019publicly}
+found that ClinicalBERT, pre-trained exclusively on MIMIC-III clinical
+notes, improved over BioBERT on NER and natural language inference tasks,
+yet underperformed on de-identification benchmarks where the test-set PHI
+format differed systematically from the MIMIC pre-training distribution.
+This result illustrates a broader pattern: domain pre-training benefits
+are sensitive to corpus--task distribution alignment, not domain membership
+alone. Our study
+extends this line of inquiry to the instruction-following era, where
+pre-training data composition interacts with instruction-tuning alignment
+in ways that are not yet well characterised.
+
+\paragraph{LLM evaluation on medical question-answering.}
+\citet{singhal2023large} evaluated PaLM and Med-PaLM on medical licensing
+examination questions (MedQA, MedMCQA, PubMedQA) and found that
+domain-specific fine-tuning substantially improved performance on
+knowledge-recall benchmarks. A critical distinction, however, is that
+multiple-choice medical QA measures knowledge retrieval, not clinical
+language \emph{generation}. Generating a coherent, grounded, structured
+nursing note from a patient's vital signs requires capabilities (structured
+output compliance, numerical grounding, instruction following) that are
+distinct from encyclopaedic medical knowledge. Our evaluation targets this
+generation regime rather than the QA regime.
+
+\paragraph{Automated nursing documentation.}
+\citet{rajkomar2018scalable} showed that EHR-grounded deep learning models
+could predict clinical events from structured data with high accuracy, but
+did not address free-text generation. More recently, \citet{nori2023capabilities} demonstrated that GPT-4 achieves
+expert-level performance on medical licensing examinations and clinical
+vignette question-answering, often matching or exceeding domain-specialised
+models, suggesting that strong general instruction-following can be
+competitive with domain fine-tuning even on clinical tasks. Our study provides a direct controlled
+comparison at the 4B parameter scale, where computational resource constraints
+make the choice between a domain model and a general model practically
+meaningful for resource-limited healthcare settings.
+
+% -----------------------------------------------------------------------
+\section{Methodology}
+\label{sec:methods}
+
+\subsection{Dataset}
+
+We use MIMIC-III \cite{johnson2016mimic}, a de-identified EHR database of
+58,976 hospital admissions at Beth Israel Deaconess Medical Center. We
+restrict to the Medical Intensive Care Unit (MICU) and filter
+\texttt{NOTEEVENTS} for nursing progress notes (\texttt{category = `Nursing'}).
+After ETL processing (see below), the dataset comprises 103,442 records across
+three splits (train 71,885 / validation 16,169 / test 15,388). All experiments
+use the validation split, sampling one record per unique hospital admission
+($n = 637$ independent records).
+
+\subsection{ETL Pipeline}
+
+Raw MIMIC-III CSVs are processed using Polars
+(lazy evaluation, chunk-safe for large joins). ITEMID harmonisation uses
+the MIMIC-Extract variable map \cite{wang2020mimic}, which maps each measurement
+identifier to a canonical variable name; only entries with verified status
+are retained. Physiological plausibility filtering applies
+per-variable outlier bounds from MIMIC-Extract \cite{wang2020mimic};
+observations outside these bounds are flagged as out-of-range.
+For each nursing note, we construct a \emph{FHIR-lite} record containing:
+
+\begin{itemize}
+  \item \textbf{Observations}: all vital sign readings from the 12~hours
+    preceding the note's \texttt{charttime}, with out-of-range flags derived
+    from the MIMIC-Extract physiological bounds \cite{wang2020mimic},
+    capped at 1,100 entries at prompt-construction time.
+  \item \textbf{Labs}: all laboratory values from the same 12-hour window,
+    capped at 150 entries at prompt-construction time.
+  \item \textbf{Medications}: all CareVue medication administration events
+    from the same window, capped at 250 entries at prompt-construction time.
+  \item \textbf{Active problems}: ICD-9 diagnoses linked to the admission.
+  \item \textbf{Hospital course}: The ``\textsc{Brief Hospital Course}'' or
+    ``\textsc{Hospital Course}'' section extracted from the admission's
+    discharge summary via regex, used as the reference for Sub-task~3.
+\end{itemize}
+
+Records are retained only if the density gate $|\text{obs}| + |\text{labs}| +
+|\text{meds}| \geq 5$ is satisfied. Temporal data uses ISO~8601 relative
+offsets (e.g., \texttt{T-10h}) to mask MIMIC date-shifting artefacts.
+The per-section caps (1,100 observations, 150 labs, 250 medications) were
+set to keep prompts within the model context window; 99.1\% of admissions
+fall entirely within these limits, and both models received identically
+constructed inputs.
+
+\subsection{Models and Inference}
+
+Both models are served via vLLM \cite{kwon2023efficient} on a single NVIDIA
+RTX~3090 (24~GB VRAM), with \texttt{tensor\_parallel\_size=1}. Sampling
+parameters are identical across all runs:
+
+\begin{itemize}
+  \item Temperature: 0.30; top-$p$: 0.90; repetition penalty: 1.15.
+  \item Max tokens: 1,024 (Sub-tasks~1 and 3); 512 (Sub-task~2).
+\end{itemize}
+
+The repetition penalty of 1.15 was necessary for \medgemma to suppress
+degenerate looping: in an initial diagnostic run on the first 500 records
+(predating the final n=637 corpus) without this penalty, 95\% of
+\medgemma outputs were hard-truncated at the token limit with no structured
+content. \gemma exhibited this behaviour in only 14 of those 500 records.
+We applied the same penalty to both models for comparability, but did not
+sweep penalties per model; we therefore cannot distinguish \medgemma's
+performance ceiling at its optimal configuration from its performance under
+the only configuration we found that produced any output (see
+Section~\ref{sec:limits}).
+
+\paragraph{Sub-task~1 prompt.} The system prompt instructs the model to act as
+an ICU nurse completing a shift note. The user turn provides all FHIR-lite
+fields as structured text and requests one complete AARP block per active
+problem, preceded by a single de-identified few-shot example drawn from the
+validation split. The same exemplar is used across all 637 prompts and is
+verified excluded from the n=637 evaluation set by \texttt{row\_id}.
+The ground truth is the original nursing note from \texttt{NOTEEVENTS}.
+Full prompt text is given in Appendix~\ref{app:prompts}.
+
+\paragraph{Sub-task~2 prompt.} The model receives only the most recent reading
+per vital sign metric and is asked to list every abnormal value with its
+clinical significance. Ground truth is derived by applying standard ICU
+clinical reference ranges (e.g., Heart Rate 60--100\,bpm, SpO$_2 \geq 95$\%)
+that are fixed in the inference engine; these are clinically motivated normal
+ranges, distinct from the statistical outlier bounds used in the ETL
+physiological plausibility filter. The full reference range table and prompt
+are given in Appendix~\ref{app:prompts}.
+
+\paragraph{Sub-task~3 prompt.} The system prompt adopts a physician persona
+and requests a free-form prose Hospital Course narrative. The user turn
+provides all FHIR-lite fields, identical in structure to Sub-task~1.
+The reference is the extracted hospital course section. Full prompt text
+is given in Appendix~\ref{app:prompts}.
+
+\subsection{Evaluation Metrics}
+
+\paragraph{Sub-task~1.}
+\begin{itemize}
+  \item \textbf{ROUGE-L} (F-measure, stemmed) against the original nursing note.
+  \item \textbf{Clinical Entity F1} (aggregate, drug surface-form, vital
+    surface-form) via \texttt{en\_core\_sci\_sm} scispaCy NER.
+  \item \textbf{AARP Section Score}: proportion of active problems receiving a
+    complete Assessment/Action/Response/Plan block within a 2400-character
+    sliding window.
+\end{itemize}
+
+\paragraph{Sub-task~2.}
+Binary precision, recall, and F1 over abnormal vital sign identification,
+where a value is ``identified'' if its label appears in the generated text.
+
+\paragraph{Sub-task~3.}
+\begin{itemize}
+  \item \textbf{ROUGE-L} against a \emph{relevance-filtered} hospital course
+    (sentences whose key terms appear in \texttt{source\_facts} only).
+  \item \textbf{BERTScore F1} (\texttt{distilbert-base-uncased}) against
+    the same filtered reference.
+  \item \textbf{Problem Coverage}: fraction of ICD-9 problem descriptions
+    appearing as verbatim lowercased substrings in the generated text.
+  \item \textbf{Out-of-Range Term Mention Rate} (formerly ``Key Lab
+    Coverage''): fraction of out-of-range vital/lab \emph{labels} (e.g.,
+    ``heart rate'', ``lactate'') present as lowercased substrings anywhere
+    in the generated text. The metric does not check that the corresponding
+    numeric value is reproduced or that the model identifies the value as
+    abnormal; it measures named mention only.
+  \item \textbf{Medication Name Mention Rate} (formerly ``Medication
+    Accuracy''): fraction of administered medications whose first
+    whitespace token (e.g., ``morphine'' from ``Morphine 2 mg administered
+    via IV'') appears as a lowercased substring in the generated text. The
+    metric does not check dose, route, or that the drug is described as
+    administered.
+\end{itemize}
+
+We use the term \emph{mention rate} rather than ``coverage'' or ``accuracy''
+to reflect that these metrics reward vocabulary overlap, not clinical
+grounding or numerical fidelity.
+
+All continuous metric comparisons use the paired Wilcoxon signed-rank test
+(two-sided) with rank-biserial correlation $r$ as a measure of direction
+consistency across paired comparisons.\footnote{Rank-biserial $r$ reports
+the proportion of paired comparisons in which one model dominates the other;
+it is a measure of \emph{direction consistency}, not effect magnitude. Values
+near 1 indicate one model wins on nearly every pair, even when the absolute
+mean difference is small.} Significance threshold: $\alpha = 0.05$. We do
+not apply a multiple-comparisons correction; results with marginal absolute
+deltas (Section~\ref{sec:results}) should therefore be interpreted with
+caution.
+
+\subsection{Pipeline Overview}
+
+Figure~\ref{fig:pipeline} illustrates the end-to-end workflow from raw
+MIMIC-III CSVs through evaluation.
+
+\begin{figure*}[tp]
+\centering
+\includegraphics[width=\textwidth]{figures/academic/fig0_pipeline.pdf}
+\caption{End-to-end pipeline. MIMIC-III raw CSVs are processed via a
+Polars-based ETL into FHIR-lite records. Phase~2 serves both models via vLLM
+on a single GPU. Phase~3 computes task-specific metrics and performs paired
+statistical comparison.}
+\label{fig:pipeline}
+\end{figure*}
+
+% -----------------------------------------------------------------------
+\section{Results}
+\label{sec:results}
+
+All three sub-tasks were evaluated over $n = 637$ independent admission records
+(one record per unique \texttt{hadm\_id}) drawn from the MIMIC-III validation
+split. Both models received identical inputs; the only experimental variable
+is the pre-training corpus.
+
+\subsection{Sub-task 1: Structured Nursing Note Generation}
+
+Table~\ref{tab:notes} reports corpus-level means and Wilcoxon test results.
+ROUGE-L scores are near-floor for both models (0.079 vs.\ 0.076); although
+the difference reaches significance, the absolute delta of $+0.003$ is below
+any threshold of practical meaning and we treat this metric as a draw.
+Aggregate clinical entity F1 is similarly near-floor (0.059 vs.\ 0.054)
+and we likewise treat it as a draw; the recogniser
+(\texttt{en\_core\_sci\_sm}) has known weak recall on ICU drug surface forms
+and abbreviations, and the absolute scores indicate the metric is dominated
+by recogniser noise rather than genuine model differences. Both metrics
+also share the limitation that the ground-truth nursing note contains
+bedside-observed content (physical examination, subjective patient reports)
+not present in the structured EHR context, so neither metric measures
+clinical accuracy directly.
+
+The clinically meaningful differences favour \gemma: AARP Section Score
+($\Delta = +0.024$, \sig) and Entity F1 (vitals)
+($\Delta = +0.016$, \pval{0.017}).
+
+The AARP result is striking but must be interpreted with care: the vast
+majority of \medgemma outputs scored zero (no complete AARP block detected),
+compared to a non-trivial fraction of \gemma outputs achieving structure.
+\medgemma consistently failed to follow the four-header structure even after
+the repetition penalty was applied. We did not sweep the repetition penalty
+per model (Section~\ref{sec:limits}); we therefore cannot rule out that
+\medgemma has a different inference configuration under which it produces
+AARP-structured output. The result establishes that \medgemma fails AARP
+compliance \emph{at the only configuration we found that produced any
+non-truncated output for it}, not that it is incapable of AARP compliance
+in principle.
+
+\begin{table}[t]
+\caption{Sub-task 1: Nursing Note Generation ($n = 637$ pairs). MG = MedGemma-4B-IT; G3 = Gemma-3-4B-IT. $\Delta$ = MG minus G3. Bold = winning model per row; $*$ = $p < 0.05$ (uncorrected). $r$ is rank-biserial direction consistency, not effect magnitude. Rows marked ``draw'' have significant $p$ but absolute $\Delta$ below practical-meaning threshold or are dominated by recogniser noise.}
+\label{tab:notes}
+\small
+\begin{tabular}{@{}lrrrrrl@{}}
+\toprule
+\textbf{Metric} & \textbf{MG} & \textbf{G3} & \textbf{$\Delta$} &
+  \textbf{$p$} & \textbf{$r$} & \textbf{Verdict} \\
+\midrule
+ROUGE-L            & \textbf{0.079} & 0.076 & $+$0.003 & $<$0.001$^*$ & 0.638 & draw \\
+Entity F1          & \textbf{0.059} & 0.054 & $+$0.005 & $<$0.001$^*$ & 0.610 & draw \\
+Entity F1 (drugs)  & 0.022 & \textbf{0.025} & $-$0.004 & 0.430 & 0.994 & n.s. \\
+Entity F1 (vitals) & 0.058 & \textbf{0.074} & $-$0.016 & 0.017$^*$ & 0.975 & G3 \\
+AARP Score         & 0.000 & \textbf{0.025} & $-$0.024 & $<$0.001$^*$ & 0.999 & G3$^\dagger$ \\
+\bottomrule
+\end{tabular}
+\\[2pt]
+{\footnotesize $^\dagger$ Penalty-configuration confound; see text.}
+\end{table}
+
+\subsection{Sub-task 2: Abnormal Value Identification}
+
+Table~\ref{tab:abnormal} reports precision, recall, and F1 for identifying
+abnormal vital signs. All three metrics are significant. \gemma
+substantially outperforms \medgemma on recall ($\Delta = +0.119$, \sig),
+F1 ($\Delta = +0.056$, \sig), and precision ($\Delta = +0.030$, \sig).
+
+The Sub-task 2 metric counts a value as ``identified'' if its label appears
+in the generated text; it does not require the model to explicitly flag the
+value as high or low. A more verbose model that names more vital signs in a
+preamble can therefore inflate its recall without performing the abnormal-
+flagging task. We cannot rule out that part of \gemma's recall advantage
+reflects greater verbosity rather than superior abnormal-value
+identification; a stricter re-scoring requiring explicit
+high/low flagging is left for future work.
+
+Figure~\ref{fig:heatmap} shows per-vital miss rates. \medgemma systematically
+misses Heart Rate (32\% miss rate) and Respiratory Rate (28\%); \gemma
+reduces these miss rates to 1\% and 3\% respectively. MAP remains difficult
+for both models (42\% MedGemma, 50\% Gemma-3), possibly because mean arterial
+pressure is a derived value that may not always appear as a direct
+\texttt{ITEMID} in CareVue.
+
+\begin{table}[t]
+\caption{Sub-task 2: Abnormal Value Identification ($n = 637$ pairs).
+Bold = winning model per row; $*$ = $p < 0.05$ (uncorrected).}
+\label{tab:abnormal}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Metric} & \textbf{MG} & \textbf{G3} & \textbf{$\Delta$} &
+  \textbf{$p$} & \textbf{$r$} \\
+\midrule
+Precision & 0.370 & \textbf{0.400} & $-$0.030 & $<$0.001$^*$ & 0.805 \\
+Recall    & 0.692 & \textbf{0.811} & $-$0.119 & $<$0.001$^*$ & 0.972 \\
+F1        & 0.453 & \textbf{0.509} & $-$0.056 & $<$0.001$^*$ & 0.828 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[tp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/academic/fig3_vital_heatmap.pdf}
+  \caption{Per-vital miss rates for Sub-task~2. Darker cells indicate higher
+  miss rates. \medgemma misses Heart Rate, MAP, and Respiratory Rate at
+  notably higher rates than \gemma. MAP remains difficult for both models.}
+  \label{fig:heatmap}
+\end{figure*}
+
+\subsection{Sub-task 3: Admission Summary Generation}
+
+\begin{figure*}[tp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/academic/fig6_summary_task.pdf}
+  \caption{Sub-task~3 results. (A) ROUGE-L violin plots. (B) BERTScore F1
+  violin plots. (C) Clinical mention-rate bar chart. \medgemma achieves
+  marginally higher lexical/semantic similarity; \gemma substantially
+  outperforms on out-of-range term mention rate. $*$ = $p < 0.05$.}
+  \label{fig:summary}
+\end{figure*}
+
+Table~\ref{tab:summary} reports all five Sub-task~3 metrics;
+Figure~\ref{fig:summary} shows per-record distributions. The pattern reverses
+partially: \medgemma achieves higher ROUGE-L and BERTScore F1, consistent
+with its reported pre-training on clinical narrative text
+\cite{medgemma2024}. However, \gemma names a higher fraction of out-of-range
+metrics and administered medications: Out-of-Range Term Mention Rate
+($\Delta = +0.079$, \sig) and Medication Name Mention Rate
+($\Delta = +0.029$, \pval{0.003}). Problem Coverage is near-floor for both
+models ($\approx$7\%) with no significant difference ($p = 0.672$),
+reflecting the difficulty of verbatim ICD-9 description matching. We caution
+that the mention-rate metrics reward vocabulary overlap, not numerical
+fidelity or clinical correctness; the same verbosity-inflates-mentions
+mechanism noted for Sub-task~2 likely contributes here.
+
+\begin{table}[t]
+\caption{Sub-task 3: Admission Summary Generation ($n = 637$ pairs). Filtered
+reference = hospital course sentences with at least one term in
+\texttt{source\_facts}. Bold = winning model per row; $*$ = $p < 0.05$
+(uncorrected). Mention-rate metrics measure named-substring presence, not
+numerical fidelity.}
+\label{tab:summary}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Metric} & \textbf{MG} & \textbf{G3} & \textbf{$\Delta$} &
+  \textbf{$p$} & \textbf{$r$} \\
+\midrule
+ROUGE-L                       & \textbf{0.110} & 0.101 & $+$0.009 & $<$0.001$^*$ & 0.743 \\
+BERTScore F1                  & \textbf{0.739} & 0.732 & $+$0.007 & $<$0.001$^*$ & 0.808 \\
+Problem Coverage              & 0.068 & \textbf{0.069} & $-$0.001 & 0.672 & 0.935 \\
+Out-of-Range Mention Rate     & 0.235 & \textbf{0.314} & $-$0.079 & $<$0.001$^*$ & 0.964 \\
+Medication Mention Rate       & 0.452 & \textbf{0.481} & $-$0.029 & 0.003$^*$ & 0.800 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Cross-task Summary}
+
+Of 13 evaluated metrics across three sub-tasks, we classify two Sub-task~1
+results (ROUGE-L, aggregate Entity F1) as draws despite reaching nominal
+significance, on the grounds that the absolute deltas (\(+0.003\) and
+\(+0.005\)) are below practical-meaning thresholds and the metrics are
+near-floor or recogniser-limited. \medgemma retains a significant advantage
+on 2 metrics (ROUGE-L and BERTScore F1 in Sub-task~3, both stylistic-
+similarity measures with modest absolute gains). \gemma retains a significant
+advantage on 7 metrics (Entity F1 vitals and AARP Score in Sub-task~1;
+Precision, Recall, and F1 in Sub-task~2; Out-of-Range Term Mention Rate and
+Medication Name Mention Rate in Sub-task~3). The remaining 4 metrics are
+draws or not significantly different (Sub-task~1 ROUGE-L and aggregate
+Entity F1 reclassified as draws; Sub-task~1 Drug Entity F1 and Sub-task~3
+Problem Coverage not significant). The AARP and mention-rate results carry
+the caveats discussed in the preceding sections.
+
+% -----------------------------------------------------------------------
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Null-to-Negative Result Interpretation}
+
+This study is an explicit null-to-negative result, and we consider that its
+most important contribution. The common inference pattern, ``this model was
+pre-trained on clinical data, therefore it should perform better on clinical
+tasks,'' is not supported by our data. At the 4B parameter scale, with
+identical architecture and inference parameters, the general instruction-tuned
+model matches or exceeds the clinically pre-trained model on the majority of
+clinically meaningful metrics.
+
+We hypothesise two explanations. First, the tasks we evaluate (structured
+output compliance, AARP format, precise numerical grounding, and instruction
+following) are primarily \emph{capability} requirements, not \emph{knowledge}
+requirements. A model that generates a correctly structured AARP block with
+accurate vital sign values succeeds through instruction adherence and pattern
+recognition, not through medical knowledge retrieval. The clinical pre-training
+corpus likely contained extensive unstructured clinical narratives, which may
+have conditioned \medgemma away from rigid template adherence.
+
+Second, the \medgemma repetition pathology (looping under long structured
+prompts) suggests that the clinical pre-training or alignment process may
+have introduced a sensitivity to long, repetitive structured contexts that
+the general model does not exhibit. This is a practical limitation: a model
+that requires a repetition penalty to produce any coherent output is
+operationally less reliable than one that does not.
+
+\subsection{Sub-task~3 Mixed Pattern}
+
+Sub-task~3 is the only task where \medgemma shows a significant advantage,
+and the advantage is on \emph{stylistic} metrics (ROUGE-L, BERTScore), not on
+named mention of input facts. This is consistent with the explanation above:
+\medgemma's pre-training corpus reportedly includes clinical notes and
+discharge summaries \cite{medgemma2024}, which share the prose style of the
+hospital course reference text. The model has learned to generate
+discharge-summary-like prose, but that prose names fewer of the specific
+out-of-range metrics and medications from the structured input than \gemma's
+output does. Because our mention-rate metrics measure substring presence
+rather than numerical fidelity, we frame this as a difference in
+\emph{vocabulary alignment with the input} rather than as clinical grounding;
+nevertheless, in a clinical safety context, naming the relevant out-of-range
+metric is a necessary (if not sufficient) condition for grounded
+documentation.
+
+\subsection{Limitations}
+\label{sec:limits}
+
+\paragraph{Independence by admission.}
+This evaluation samples one record per unique hospital admission ($n = 637$
+unique admissions). This design satisfies the paired independence assumption
+of the Wilcoxon test and eliminates the within-admission ICD-9 correlation
+present in note-level sampling. Results represent 637 statistically independent
+patients.
+
+\paragraph{ROUGE-L and Entity F1 floor effect.}
+Sub-task~1 ROUGE-L is 0.076--0.079 for both models, near-floor; aggregate
+Entity F1 is similarly low at 0.054--0.059.
+The ground-truth nursing notes are written from direct bedside observation
+(physical examination, subjective patient reports) that is entirely absent
+from the structured EHR context. No model can recover this information.
+Neither metric is a valid quality signal for this task; we retain them only
+for comparability with prior work and reclassify them as draws.
+
+\paragraph{Inference configuration confound.}
+We applied an identical repetition penalty of 1.15 to both models because
+preliminary diagnostics showed \medgemma degenerated into truncated loops
+without it. We did not subsequently sweep the penalty per model. Each
+model's performance ceiling at its own optimal inference configuration is
+therefore unknown, and the AARP Score result in Sub-task~1 in particular
+should be read as ``\medgemma fails AARP at the only configuration we found
+that produced any non-truncated output for it,'' not as a configuration-
+independent capability claim.
+
+\paragraph{Sub-task 2 verbosity confound.}
+The Sub-task 2 metric counts a vital sign as identified if its label appears
+in the generated text, without requiring the model to flag the value as
+abnormal. A more verbose model can therefore inflate recall by naming more
+metrics in preamble. We did not re-score with a stricter explicit-flagging
+rule.
+
+\paragraph{Sub-task 3 mention-rate metrics.}
+Out-of-Range Term Mention Rate and Medication Name Mention Rate measure
+substring presence of metric labels and medication first-tokens
+respectively. They do not check that numeric values are accurate, that
+medications are described as administered, or that out-of-range values are
+explicitly identified as abnormal. They reward vocabulary alignment with
+the input, not clinical grounding in a strong sense.
+
+\paragraph{BERTScore encoder.}
+BERTScore F1 was computed with \texttt{distilbert-base-uncased}, a
+general-domain distilled encoder that may over-reward stylistic fluency
+relative to clinical specificity. A clinical encoder
+(e.g., \texttt{Bio\_ClinicalBERT}) may yield different relative scores
+between the two models on Sub-task~3.
+
+\paragraph{Single ICU type and institution.}
+All records are from the MICU at a single Boston academic medical centre.
+Nursing note conventions, vital sign reference ranges, and medication
+administration practices differ across ICU types (cardiac, surgical,
+neonatal) and institutions. Generalisability is unknown.
+
+\paragraph{Parameter scale.}
+Both models are 4B parameters; this is simultaneously a design strength and a
+limitation. The controlled comparison (identical size, identical architecture,
+identical inference parameters) isolates pre-training corpus as the single
+experimental variable, but the results speak only to this scale. Two distinct
+scale effects remain unexplored: (1)~whether the \emph{absolute capability
+floor} at 4B suppresses task performance for both models equally, masking
+pre-training effects that emerge only at higher capacity; and (2)~whether the
+\emph{relative ordering} between clinical and general pre-training is stable
+across scales. We observed that \medgemma's primary failure mode (AARP
+instruction non-compliance) is a general instruction-following deficit; this
+class of failure tends to diminish at larger parameter counts for all models.
+However, \gemma's larger variants (12B, 27B) also benefit from the same
+scaling, so the relative advantage is not guaranteed to reverse. Evaluating
+\medgemma-27B against \gemma-27B would be the natural follow-up.
+
+\paragraph{Single checkpoint pair.}
+We compare exactly two checkpoints. They differ in pre-training corpus, but
+also in alignment recipe, instruction-tuning data, RLHF, and possibly base
+model snapshot. Our design therefore falsifies the vendor's specialization
+claim for this checkpoint pair without isolating the pre-training corpus as
+the causal driver. Generalisation to other clinical-vs.-general pairs
+(e.g., Meditron-7B vs.\ Llama-2-7B; BioMistral vs.\ Mistral-7B) is left for
+future work.
+
+\paragraph{No multiple-comparisons correction.}
+We report uncorrected $p$-values across 13 metrics. Several of the marginal
+results in Sub-task~1 (ROUGE-L, aggregate Entity F1) have absolute deltas
+below practical-meaning thresholds; we have reclassified these as draws in
+the cross-task summary, but readers applying a Holm or BH-FDR correction
+should not be surprised if some borderline significances do not survive
+adjustment.
+
+% -----------------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+We evaluated \medgemma against \gemma on three MICU nursing tasks from
+MIMIC-III, using one record per unique hospital admission ($n = 637$
+independent records) and 13 metrics. For this checkpoint pair at the 4B
+parameter scale, the clinically marketed model does not provide a consistent
+performance advantage. After reclassifying near-floor Sub-task~1 metrics as
+draws, \gemma significantly outperforms \medgemma on 7 of 13 metrics,
+including AARP document compliance (subject to an inference-configuration
+caveat), abnormal value recall and precision, and named mention of
+out-of-range metrics and medications in summaries. \medgemma retains
+significant but modest advantages on stylistic similarity in free-form prose
+(ROUGE-L and BERTScore F1 in Sub-task~3). Because our design varies both
+pre-training corpus and alignment recipe between the two checkpoints, we
+cannot attribute this pattern to pre-training corpus alone.
+
+These findings have a practical implication: for resource-constrained
+healthcare settings evaluating this specific 4B-parameter checkpoint pair
+for MICU documentation support, the evidence does not justify a preference
+for \medgemma on the basis of vendor specialization claims.
+We hypothesise, without proving, that the more important variable is
+instruction-following quality, which is shaped by alignment training rather
+than pre-training corpus composition.
+
+\paragraph{Future work.}
+Two extensions would strengthen these findings: (1) evaluate
+\medgemma-27B against \gemma-27B to test whether the relative ordering is
+stable across parameter scales;
+(2) conduct a prospective human evaluation in which ICU nurses rate clinical
+accuracy and usability of generated notes, which would provide the ground
+truth that automated metrics cannot. We also identify the automated detection
+of ICD-9 problem coverage as an open metric design problem: verbatim
+description matching is too strict; clinical concept matching via UMLS
+normalisation would be more informative.
+
+% -----------------------------------------------------------------------
+\clearpage
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+% -----------------------------------------------------------------------
+\appendix
+
+\section{Prompt Templates}
+\label{app:prompts}
+
+All prompts follow the chat format: a fixed system message sets the model
+persona and constraints; a user message provides the structured patient
+context assembled from the FHIR-lite record (Section~\ref{sec:methods}).
+Placeholders in angle brackets represent fields populated at runtime.
+
+\subsection*{Sub-task 1: Nursing Note Generation}
+
+\textbf{System:}
+\begin{quote}
+\small
+You are an experienced MICU nurse writing an end-of-shift progress note.
+Use clinical shorthand. Do not invent medications, procedures, or diagnoses
+not present in the context. Do not include a document header.
+\end{quote}
+
+\textbf{User:}
+\begin{quote}
+\small
+\textit{[Admission context: patient identifier, care unit, admitting
+diagnosis, admit time offset]}\\
+\textit{[Active problems: ranked ICD-9 diagnosis list]}\\
+\textit{[Observations: vital signs from the 12-hour window, with
+out-of-range flags, capped at 1,100 entries]}\\
+\textit{[Labs: laboratory values from the 12-hour window, capped at 150 entries]}\\
+\textit{[Medications: CareVue administration events, capped at 250 entries]}\\
+\textit{[Procedures: CareVue procedure events]}\\
+
+\medskip
+\textbf{Example note (for format reference only; do not copy content)}
+
+\smallskip
+Impaired Skin Integrity\\
+Assessment:\\
+All skin surfaces as documented in flowsheets. Some sloughing on buttocks,
+pt stooling loose bilious green BM.\\
+Action:\\
+Buttocks cleansed, antifungal cream and adaptic applied. Flexiseal ordered
+and inserted.\\
+Response:\\
+Buttock areas free of fecal contamination overnoc, areas appear slightly
+less irritated.\\
+Plan:\\
+Cleanse and treat impaired skin areas, protect open areas from friction and
+fecal contamination.
+
+\medskip
+Renal failure, acute (ARF)\\
+Assessment:\\
+CRRT as ordered, no difficulties with circuit. UO via foley 10--15 cc clear
+yellow.\\
+Action:\\
+Removed 1--200 cc/h. Ca and K gtts titrated per labs.\\
+Response:\\
+Attained fluid removal goal, neg 2700 cc yesterday. Hemodynamically stable.\\
+Plan:\\
+Fluid removal goal 2.5--3 L/day. Monitor lytes q6 and titrate repletion
+gtts as ordered.
+
+\medskip
+\textbf{Task}\\
+Write the nursing progress note. One AARP block per active problem.
+Synthesise the data; do not restate it verbatim.
+\end{quote}
+
+The few-shot example is drawn from a de-identified MIMIC-III nursing note
+in the validation split and is included in the user turn so the model
+treats it as a concrete format demonstration.
+
+\subsection*{Sub-task 2: Abnormal Value Identification}
+
+\textbf{System:}
+\begin{quote}
+\small
+You are an experienced MICU nurse reviewing a patient's vital signs.
+Identify which values are clinically abnormal for an ICU adult patient.
+For each abnormal value: (1) state whether it is high or low,
+(2) give the normal adult range with units,
+(3) name the clinical concern in one sentence.
+If a value is within normal limits, do not mention it.
+Be concise. Use clinical shorthand.
+\end{quote}
+
+\textbf{User:}
+\begin{quote}
+\small
+\textbf{Patient Context}\\
+Admitting diagnosis: \textit{[admit diagnosis]}\\
+Care unit: \textit{[care unit]}
+
+\medskip
+\textbf{Most Recent Vital Signs}\\
+\textit{[One line per metric: name, value, unit, time offset]}
+
+\medskip
+\textbf{Task}\\
+Identify and explain any clinically abnormal vital signs above.
+\end{quote}
+
+Only the nine metrics with hardcoded ICU reference ranges are included
+(Heart Rate 60--100\,bpm; Systolic BP 90--140\,mmHg; Diastolic BP
+50--90\,mmHg; MAP 65--105\,mmHg; Respiratory Rate 12--20\,breaths/min;
+SpO$_2 \geq 95$\%; Temperature 97.7--99.5\,\textdegree F;
+CVP 2--12\,mmHg; Glucose 70--180\,mg/dL). These same ranges define the
+ground-truth labels used for evaluation and are independent of the
+statistical outlier bounds applied during ETL.
+
+\subsection*{Sub-task 3: Admission Summary Generation}
+
+\textbf{System:}
+\begin{quote}
+\small
+You are an experienced MICU attending physician writing the Hospital Course
+section of a discharge summary. Synthesise the structured ICU data provided
+into a concise problem-oriented narrative. For each active problem: describe
+the clinical findings, key investigations, interventions, and patient
+response. Use clinical language. Be specific: cite abnormal values,
+medications, and procedures by name. Do not use bullet points or AARP
+headings; write flowing prose.
+\end{quote}
+
+\textbf{User:}
+\begin{quote}
+\small
+\textit{[Admission context, active problems, observations, labs,
+medications, procedures; identical fields to Sub-task 1]}
+
+\medskip
+\textbf{Task}\\
+Write the Hospital Course narrative for this 12-hour ICU window.
+One paragraph per active problem.
+Synthesise the data; do not restate it verbatim.
+\end{quote}
+
+\end{document}

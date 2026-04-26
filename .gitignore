@@ -1,0 +1,16 @@
+# Data
+data/
+*.csv
+*.json
+*.gz
+
+# Python
+__pycache__/
+.venv/
+*.pyc
+
+# Environment
+.env
+auth.json
+figures
+references
