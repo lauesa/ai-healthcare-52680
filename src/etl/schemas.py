@@ -1,10 +1,4 @@
 """Pydantic v2 schema definitions for the FHIR-lite ETL output.
-
-This module defines the data models used to validate and serialize records
-produced by the Phase 1 ETL pipeline before they are written to disk.
-
-All models enforce structural and semantic constraints described in the
-study's FHIR-lite JSON specification.
 """
 
 import re
@@ -259,9 +253,7 @@ class NoteMetadata(BaseModel):
         hadm_id: Hospital admission identifier (HADM_ID).
         note_id: Source row identifier from NOTEEVENTS (ROW_ID).
         careunit: ICU care unit in which the note was written, sourced from
-            ICUSTAYS.FIRST_CAREUNIT (e.g. ``"MICU"``).  Preserved for
-            post-hoc stratification in Phase 3 without requiring a separate
-            join at evaluation time.
+            ICUSTAYS.FIRST_CAREUNIT (e.g. ``"MICU"``).
         admit_diagnosis: Free-text admission diagnosis string from
             ADMISSIONS.DIAGNOSIS (e.g. ``"RESPIRATORY FAILURE"``).  Provides
             the presenting complaint for SBAR ``Situation`` generation.
@@ -304,12 +296,11 @@ class FHIRLiteRecord(BaseModel):
         procedures: Bedside procedure events within the 12-hour window from
             PROCEDUREEVENTS_MV, sorted most-recent-first.  Grounds the SBAR
             ``Action`` and ``Response`` sections.
-        ground_truth: Full text of the original nursing note, preserved for
-            Phase 3 evaluation.
+        ground_truth: Full text of the original nursing note
         source_facts: Flat list of natural-language grounding statements
             derived from all structured sources (observations, labs,
             medications, procedures, active problems), e.g.
-            ``"Heart Rate was 88 bpm at T-2h 10m"``.  Used by the Phase 3
+            ``"Heart Rate was 88 bpm at T-2h 10m"``.  Used by the
             hallucination audit to distinguish intrinsic errors (model
             misrepresents a fact present in source_facts) from extrinsic
             errors (model fabricates a fact absent from source_facts).

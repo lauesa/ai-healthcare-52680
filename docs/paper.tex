@@ -1,19 +1,18 @@
-%% ACM Workshop Paper Template
-%% Clinical Domain Pre-training vs. General Instruction-Tuning
-%% Compiled with: pdflatex paper.tex; bibtex paper; pdflatex paper.tex; pdflatex paper.tex
-
 \documentclass[sigconf,anonymous=false,review=false]{acmart}
 
-%% Remove ACM-specific copyright block for course submission
-\setcopyright{none}
-\acmConference[Course Paper]{Graduate Seminar: AI in Healthcare}{2026}{University}
+\acmConference[AI in Healthcare]{Graduate Seminar: AI in Healthcare}{2026}{University of Texas at Austin}
 \acmYear{2026}
+
+% Remove ACM copyright/permission block (course paper — no proceedings production)
+\settopmatter{printacmref=false}
+\renewcommand{\footnotetextcopyrightpermission}[1]{}
 
 \usepackage{booktabs}
 \usepackage{microtype}
 \usepackage{graphicx}
 \usepackage{xspace}
 \usepackage[utf8]{inputenc}
+\usepackage{url}
 
 %% Convenience macros
 \newcommand{\medgemma}{MedGemma-4B-IT\xspace}
@@ -26,9 +25,9 @@
 
 \title{Vendor Specialization Claims at 4B:\\ A Controlled Comparison of MedGemma and Gemma-3\\ on MIMIC-III MICU Nursing Tasks}
 
-\author{Anonymous}
-\email{anonymous@university.edu}
-\affiliation{\institution{University}}
+\author{Scott Laue}
+\email{slaue@utexas.edu}
+\affiliation{\institution{University of Texas at Austin}}
 
 \begin{abstract}
 Large language models (LLMs) marketed as pre-trained on clinical corpora are
@@ -43,9 +42,9 @@ admission summary generation (Sub-task~3). Using one record per unique hospital
 admission ($n = 637$ independent records) and 13 evaluation metrics, the
 clinically marketed checkpoint provides no consistent advantage. \gemma matches
 or outperforms \medgemma on the majority of metrics, including abnormal value
-recall ($\Delta = +0.119$, $p < 0.001$), AARP document structure
-($\Delta = +0.024$, $p < 0.001$), and named mention of out-of-range metrics
-in free-form summaries ($\Delta = +0.079$, $p < 0.001$). We caution that the
+recall ($\Delta = -0.119$, $p < 0.001$), AARP document structure
+($\Delta = -0.024$, $p < 0.001$), and named mention of out-of-range metrics
+in free-form summaries ($\Delta = -0.079$, $p < 0.001$). We caution that the
 two checkpoints differ in alignment recipe as well as pre-training corpus, so
 these results falsify the vendor's specialization claim for this checkpoint
 pair without identifying the pre-training corpus as the causal driver. We
@@ -87,7 +86,7 @@ provide a measurable advantage here, the vendor's specialization claim
 requires revision for that checkpoint.
 
 This paper provides exactly that test for one checkpoint pair. We compare
-\medgemma \cite{medgemma2024} (Google's 4B-parameter model marketed as
+\medgemma \cite{medgemma2025} (Google's 4B-parameter model marketed as
 pre-trained on clinical and biomedical corpora) against \gemma
 \cite{gemmateam2025gemma3}, a general instruction-tuned model of identical
 size and architecture, on three tasks derived from MIMIC-III
@@ -352,8 +351,8 @@ not present in the structured EHR context, so neither metric measures
 clinical accuracy directly.
 
 The clinically meaningful differences favour \gemma: AARP Section Score
-($\Delta = +0.024$, \sig) and Entity F1 (vitals)
-($\Delta = +0.016$, \pval{0.017}).
+($\Delta = -0.024$, \sig) and Entity F1 (vitals)
+($\Delta = -0.016$, \pval{0.017}).
 
 The AARP result is striking but must be interpreted with care: the vast
 majority of \medgemma outputs scored zero (no complete AARP block detected),
@@ -391,8 +390,8 @@ AARP Score         & 0.000 & \textbf{0.025} & $-$0.024 & $<$0.001$^*$ & 0.999 & 
 
 Table~\ref{tab:abnormal} reports precision, recall, and F1 for identifying
 abnormal vital signs. All three metrics are significant. \gemma
-substantially outperforms \medgemma on recall ($\Delta = +0.119$, \sig),
-F1 ($\Delta = +0.056$, \sig), and precision ($\Delta = +0.030$, \sig).
+substantially outperforms \medgemma on recall ($\Delta = -0.119$, \sig),
+F1 ($\Delta = -0.056$, \sig), and precision ($\Delta = -0.030$, \sig).
 
 The Sub-task 2 metric counts a value as ``identified'' if its label appears
 in the generated text; it does not require the model to explicitly flag the
@@ -452,10 +451,10 @@ Table~\ref{tab:summary} reports all five Sub-task~3 metrics;
 Figure~\ref{fig:summary} shows per-record distributions. The pattern reverses
 partially: \medgemma achieves higher ROUGE-L and BERTScore F1, consistent
 with its reported pre-training on clinical narrative text
-\cite{medgemma2024}. However, \gemma names a higher fraction of out-of-range
+\cite{medgemma2025}. However, \gemma names a higher fraction of out-of-range
 metrics and administered medications: Out-of-Range Term Mention Rate
-($\Delta = +0.079$, \sig) and Medication Name Mention Rate
-($\Delta = +0.029$, \pval{0.003}). Problem Coverage is near-floor for both
+($\Delta = -0.079$, \sig) and Medication Name Mention Rate
+($\Delta = -0.029$, \pval{0.003}). Problem Coverage is near-floor for both
 models ($\approx$7\%) with no significant difference ($p = 0.672$),
 reflecting the difficulty of verbatim ICD-9 description matching. We caution
 that the mention-rate metrics reward vocabulary overlap, not numerical
@@ -537,7 +536,7 @@ Sub-task~3 is the only task where \medgemma shows a significant advantage,
 and the advantage is on \emph{stylistic} metrics (ROUGE-L, BERTScore), not on
 named mention of input facts. This is consistent with the explanation above:
 \medgemma's pre-training corpus reportedly includes clinical notes and
-discharge summaries \cite{medgemma2024}, which share the prose style of the
+discharge summaries \cite{medgemma2025}, which share the prose style of the
 hospital course reference text. The model has learned to generate
 discharge-summary-like prose, but that prose names fewer of the specific
 out-of-range metrics and medications from the structured input than \gemma's
@@ -674,6 +673,14 @@ truth that automated metrics cannot. We also identify the automated detection
 of ICD-9 problem coverage as an open metric design problem: verbatim
 description matching is too strict; clinical concept matching via UMLS
 normalisation would be more informative.
+
+% -----------------------------------------------------------------------
+\section*{Reproducibility}
+
+Code, evaluation scripts, and figure generation are available at
+\url{https://github.com/lauesa/ai-healthcare-52680}.
+MIMIC-III data requires a credentialed PhysioNet account and cannot be
+redistributed.
 
 % -----------------------------------------------------------------------
 \clearpage

@@ -1,37 +1,11 @@
-"""Phase 3: Scientific Audit — evaluation metrics for generated nursing notes.
+"""
+CLI usage::
 
-Central question
-----------------
-Does clinical domain pre-training (MedGemma-4B-IT) produce measurably better
-MICU nursing note generation than a general-purpose baseline of identical size
-(Gemma-3-4B-IT), or is a well-prompted general model sufficient?
-
-Public API
-----------
-- :func:`score_record`         — ROUGE-L, Clinical Entity F1, AARP score.
-- :func:`score_summary_record` — ROUGE-L, BERTScore F1, and clinical coverage
-  metrics for Sub-task 3 admission summary evaluation.
-- :func:`compute_corpus_summary` — aggregate per-record scores to mean ± std.
-- :func:`wilcoxon_compare`     — paired Wilcoxon + rank-biserial r.
-
-GPU routing
------------
-scispaCy NER runs on Device 1 (RTX 2080 Ti, 11 GB) to avoid contention with
-vLLM on Device 0 during Phase 2 inference.  ``CUDA_VISIBLE_DEVICES=1`` is set
-at module import before any spaCy / scispaCy import.
-
-CLI modes
----------
-Score mode (default)::
-
-    python -m src.evaluation.metrics \\
+    python -m src.evaluation.metrics score \\
         --inference data/processed/inference_notes_medgemma_val637opa.jsonl \\
         --reference data/processed/fhir_lite_val.jsonl
 
-Compare mode::
-
-    python -m src.evaluation.metrics \\
-        --compare \\
+    python -m src.evaluation.metrics compare \\
         --eval-a  data/processed/eval_notes_medgemma_val637opa.jsonl \\
         --eval-b  data/processed/eval_notes_gemma3_val637opa.jsonl
 """
@@ -45,18 +19,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# GPU routing — must precede any spaCy / scispaCy import
-# ---------------------------------------------------------------------------
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
 
 import spacy
 from rouge_score import rouge_scorer as _rouge_scorer
 from scipy.stats import wilcoxon as _scipy_wilcoxon
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -64,29 +32,14 @@ logging.basicConfig(
 )
 _log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# AARP header detection
-# ---------------------------------------------------------------------------
-# Matches Assessment / Action / Response / Plan section headers in the
-# generated note, case-insensitive, with optional leading punctuation/whitespace.
 _AARP_HEADERS = re.compile(
     r"\b(assessment|action|response|plan)\b",
     re.IGNORECASE,
 )
-# Window (in characters) within which all four headers must appear for a
-# block to count as complete.
-_AARP_WINDOW_CHARS: int = 2400  # ~600 tokens × 4 chars/token heuristic
+_AARP_WINDOW_CHARS: int = 2400
 
-# ---------------------------------------------------------------------------
-# source_facts pattern constants
-# ---------------------------------------------------------------------------
 _OOR_SUFFIX = "[OUT_OF_RANGE]"
 _MED_MARKER = "administered via"
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 
 def _f1_from_sets(gen_set: set, ref_set: set) -> float:
@@ -101,15 +54,10 @@ def _f1_from_sets(gen_set: set, ref_set: set) -> float:
     """
     if not gen_set or not ref_set:
         return 0.0
-    overlap = gen_set & ref_set
+    overlap   = gen_set & ref_set
     precision = len(overlap) / len(gen_set)
-    recall = len(overlap) / len(ref_set)
+    recall    = len(overlap) / len(ref_set)
     return 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-
-
-# ---------------------------------------------------------------------------
-# scispaCy loader
-# ---------------------------------------------------------------------------
 
 
 def _load_nlp() -> spacy.language.Language:
@@ -117,16 +65,8 @@ def _load_nlp() -> spacy.language.Language:
 
     Returns:
         Loaded ``en_core_sci_sm`` pipeline.
-
-    Raises:
-        OSError: If the model is not installed.
     """
     return spacy.load("en_core_sci_sm")
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 
 def score_record(
@@ -137,37 +77,20 @@ def score_record(
 ) -> dict[str, float]:
     """Compute ROUGE-L, Clinical Entity F1 (aggregate + per-class), and AARP score.
 
-    Entity sets are deduplicated (lowercased, whitespace-stripped) before
-    comparison.  Match criterion is exact string equality after normalisation.
-
-    Per-class entity F1 is computed for three clinically meaningful entity
-    groups using ``en_core_sci_sm`` label heuristics:
-
-    - **drugs**: entities whose surface form overlaps with known drug-name
-      patterns (contains digits or ends in common drug suffixes) or whose
-      label is ``CHEMICAL``.
-    - **diagnoses**: entities labelled ``DISEASE`` or ``CONDITION``.
-    - **vitals**: entities matching vital-sign metric names (heart rate, BP, etc.)
-
     Args:
         generated: The model-generated note text.
         reference: The human-written ground-truth note text.
         nlp: Loaded ``en_core_sci_sm`` pipeline.
-        active_problems: List of active problem dicts from the FHIRLiteRecord
-            (used to compute the AARP score denominator).  If ``None`` or
-            empty, AARP score is computed as a binary (any complete block
-            present = 1.0, none = 0.0).
+        active_problems: Active problem dicts from the FHIRLiteRecord.
 
     Returns:
         Dict with keys ``rouge_l``, ``entity_precision``, ``entity_recall``,
         ``entity_f1``, ``aarp_score``, ``entity_f1_drugs``,
         ``entity_f1_diagnoses``, ``entity_f1_vitals``.
     """
-    # --- ROUGE-L -----------------------------------------------------------
     _scorer = _rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
     rouge_l = _scorer.score(reference, generated)["rougeL"].fmeasure
 
-    # --- Clinical Entity F1 (aggregate) ------------------------------------
     gen_doc = nlp(generated)
     ref_doc = nlp(reference)
 
@@ -175,9 +98,9 @@ def score_record(
     ref_ents = {e.text.lower().strip() for e in ref_doc.ents}
 
     if gen_ents and ref_ents:
-        overlap = gen_ents & ref_ents
+        overlap   = gen_ents & ref_ents
         precision = len(overlap) / len(gen_ents)
-        recall = len(overlap) / len(ref_ents)
+        recall    = len(overlap) / len(ref_ents)
         f1 = (
             2 * precision * recall / (precision + recall)
             if (precision + recall) > 0
@@ -186,7 +109,6 @@ def score_record(
     else:
         precision = recall = f1 = 0.0
 
-    # --- Per-class Entity F1 -----------------------------------------------
     _DRUG_SUFFIXES = re.compile(
         r"(mab|nib|pril|olol|statin|cillin|mycin|cycline|azole|"
         r"prazole|lukast|sartan|dipine|fenac|oxacin|pam|lam)\b",
@@ -216,7 +138,7 @@ def score_record(
     gen_ents_list = list(gen_doc.ents)
     ref_ents_list = list(ref_doc.ents)
 
-    all_labels = {e.label_ for e in gen_ents_list} | {e.label_ for e in ref_ents_list}
+    all_labels     = {e.label_ for e in gen_ents_list} | {e.label_ for e in ref_ents_list}
     has_typed_labels = bool(all_labels - {"ENTITY", ""})
 
     if has_typed_labels:
@@ -225,21 +147,20 @@ def score_record(
         f1_vitals    = _f1_from_sets(_label_ents(gen_ents_list, "QUANTITY"),  _label_ents(ref_ents_list, "QUANTITY"))
     else:
         f1_drugs     = _f1_from_sets(_surface_ents(gen_ents_list, "drugs"),  _surface_ents(ref_ents_list, "drugs"))
-        f1_diagnoses = 0.0   # cannot distinguish without typed labels
+        f1_diagnoses = 0.0
         f1_vitals    = _f1_from_sets(_surface_ents(gen_ents_list, "vitals"), _surface_ents(ref_ents_list, "vitals"))
 
-    # --- AARP section presence score ---------------------------------------
     aarp_score = aarp_section_score(generated, active_problems)
 
     return {
-        "rouge_l":           round(rouge_l, 6),
-        "entity_precision":  round(precision, 6),
-        "entity_recall":     round(recall, 6),
-        "entity_f1":         round(f1, 6),
-        "aarp_score":        round(aarp_score, 6),
-        "entity_f1_drugs":   round(f1_drugs, 6),
+        "rouge_l":             round(rouge_l, 6),
+        "entity_precision":    round(precision, 6),
+        "entity_recall":       round(recall, 6),
+        "entity_f1":           round(f1, 6),
+        "aarp_score":          round(aarp_score, 6),
+        "entity_f1_drugs":     round(f1_drugs, 6),
         "entity_f1_diagnoses": round(f1_diagnoses, 6),
-        "entity_f1_vitals":  round(f1_vitals, 6),
+        "entity_f1_vitals":    round(f1_vitals, 6),
     }
 
 
@@ -249,35 +170,24 @@ def aarp_section_score(
 ) -> float:
     """Compute the AARP section presence score for a generated note.
 
-    Measures the proportion of active problems that received a complete
-    Assessment / Action / Response / Plan block.  A block is "complete" when
-    all four headers appear within ``_AARP_WINDOW_CHARS`` characters of each
-    other in the generated text.
-
-    If ``active_problems`` is ``None`` or empty, the score is binary:
-    1.0 if at least one complete block exists anywhere in the note, else 0.0.
-
     Args:
         generated: The model-generated note text.
-        active_problems: List of active problem dicts from FHIRLiteRecord.
+        active_problems: Active problem dicts from FHIRLiteRecord.
 
     Returns:
         Float in [0.0, 1.0].
     """
     n_problems = len(active_problems) if active_problems else 0
 
-    # Find all positions of each header in the text.
     header_positions: dict[str, list[int]] = {
         h: [] for h in ("assessment", "action", "response", "plan")
     }
     for m in _AARP_HEADERS.finditer(generated):
         header_positions[m.group(1).lower()].append(m.start())
 
-    # A complete block requires one of each header within the window.
-    # Slide a window over all combinations anchored to each Assessment hit.
     complete_blocks = 0
     for assess_pos in header_positions["assessment"]:
-        window_end = assess_pos + _AARP_WINDOW_CHARS
+        window_end   = assess_pos + _AARP_WINDOW_CHARS
         has_action   = any(assess_pos <= p <= window_end for p in header_positions["action"])
         has_response = any(assess_pos <= p <= window_end for p in header_positions["response"])
         has_plan     = any(assess_pos <= p <= window_end for p in header_positions["plan"])
@@ -287,7 +197,6 @@ def aarp_section_score(
     if n_problems == 0:
         return 1.0 if complete_blocks >= 1 else 0.0
 
-    # Cap at 1.0 — extra blocks beyond problem count don't penalise.
     return min(1.0, complete_blocks / n_problems)
 
 
@@ -297,40 +206,13 @@ def score_abnormal_record(
 ) -> dict[str, float]:
     """Score a Sub-task 2 (abnormal value identification) generation.
 
-    Ground-truth labels are derived from hardcoded clinical reference ranges
-    (see ``_CLINICAL_RANGES`` in ``engine.py``) applied to the record's most
-    recent vital sign readings.  The evaluator measures whether the model
-    correctly identifies which values are abnormal (recall) without hallucinating
-    abnormalities that are not present (precision).
-
-    Each metric in ``gt_flags`` contributes one binary sample:
-
-    - **True positive (TP)**: model mentions the metric *and* the GT flag
-      is ``is_abnormal=True``.
-    - **False positive (FP)**: model mentions the metric *and* the GT flag
-      is ``is_abnormal=False``.
-    - **False negative (FN)**: model does *not* mention the metric *and*
-      the GT flag is ``is_abnormal=True``.
-
-    "Mentions" is detected by case-insensitive regex search for the metric
-    ``label`` string from ``gt_flags`` (e.g. ``"heart rate"``, ``"SpO2"``).
-
     Args:
         generated: The model-generated response text.
-        gt_flags: Ground-truth list produced by ``PromptBuilder.build_abnormal``,
-            each entry a dict with keys ``metric``, ``value``, ``unit``,
-            ``is_abnormal``, ``low``, ``high``, ``label``.
+        gt_flags: Ground-truth list from ``PromptBuilder.build_abnormal``.
 
     Returns:
-        Dict with keys:
-
-        - ``abnormal_precision``: TP / (TP + FP); fraction of flagged values
-          that are truly abnormal.
-        - ``abnormal_recall``: TP / (TP + FN); fraction of truly abnormal
-          values that the model identified.
-        - ``abnormal_f1``: harmonic mean of precision and recall.
-        - ``n_truly_abnormal``: count of abnormal values in the GT.
-        - ``n_flagged_by_model``: count of abnormal values mentioned in output.
+        Dict with keys ``abnormal_precision``, ``abnormal_recall``,
+        ``abnormal_f1``, ``n_truly_abnormal``, ``n_flagged_by_model``.
     """
     if not gt_flags:
         return {
@@ -341,17 +223,15 @@ def score_abnormal_record(
             "n_flagged_by_model": 0,
         }
 
-    gen_lower = generated.lower()
-    tp = fp = fn = 0
+    gen_lower        = generated.lower()
+    tp = fp = fn     = 0
     n_truly_abnormal = sum(1 for f in gt_flags if f["is_abnormal"])
-    n_flagged = 0
+    n_flagged        = 0
 
     for flag in gt_flags:
-        label = flag["label"].lower()
-        # Also accept common abbreviations: "hr", "sbp", "spo2", "rr", "temp"
+        label    = flag["label"].lower()
         mentioned = bool(re.search(re.escape(label), gen_lower))
         if not mentioned:
-            # Try metric name itself
             mentioned = bool(re.search(re.escape(flag["metric"].lower()), gen_lower))
 
         if mentioned and flag["is_abnormal"]:
@@ -390,30 +270,10 @@ def score_summary_record(
 ) -> dict[str, float]:
     """Score a Sub-task 3 (admission summary) generation.
 
-    Computes three complementary signal types:
-
-    1. **Lexical overlap** — ROUGE-L against the discharge summary
-       ``HOSPITAL COURSE`` section (reference).  Only sentences from
-       ``hospital_course`` whose key terms appear in ``source_facts`` are
-       retained as a *filtered reference*, reducing the 12-hour window /
-       multi-day summary mismatch artefact.
-
-    2. **Semantic similarity** — BERTScore F1 (``distilbert-base-uncased``,
-       CPU) against the same filtered reference.
-
-    3. **Clinical coverage** — three task-specific coverage scores:
-
-       - ``problem_coverage``: fraction of active problem names mentioned
-         in the generated text (case-insensitive substring).
-       - ``key_lab_coverage``: fraction of out-of-range lab values whose
-         metric name appears in the generated text.
-       - ``medication_accuracy``: fraction of administered medications whose
-         name appears in the generated text.
-
     Args:
         generated: The model-generated summary text.
-        hospital_course: Discharge summary ``HOSPITAL COURSE`` reference text.
-        source_facts: ``source_facts`` list from the ``FHIRLiteRecord``.
+        hospital_course: Discharge summary HOSPITAL COURSE reference text.
+        source_facts: ``source_facts`` list from the FHIRLiteRecord.
         active_problems: Active problem dicts (for ``problem_coverage``).
         labs: Lab result dicts (for ``key_lab_coverage``).
         medications: Medication dicts (for ``medication_accuracy``).
@@ -422,19 +282,13 @@ def score_summary_record(
         Dict with keys ``rouge_l``, ``bertscore_f1``,
         ``problem_coverage``, ``key_lab_coverage``, ``medication_accuracy``.
     """
-    # ------------------------------------------------------------------
-    # 1. Build a filtered reference from hospital_course sentences whose
-    #    key terms overlap with source_facts (mitigates window mismatch).
-    # ------------------------------------------------------------------
     facts_blob = " ".join(source_facts).lower()
 
     def _sentence_split(text: str) -> list[str]:
-        """Very lightweight sentence splitter (no NLTK dependency)."""
         return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
 
     hc_sentences = _sentence_split(hospital_course) if hospital_course else []
 
-    # A sentence is "relevant" if ≥1 word of ≥4 chars from it appears in facts_blob.
     def _is_relevant(sentence: str) -> bool:
         for word in re.findall(r"\b[a-zA-Z]{4,}\b", sentence.lower()):
             if word in facts_blob:
@@ -442,29 +296,22 @@ def score_summary_record(
         return False
 
     relevant_sentences = [s for s in hc_sentences if _is_relevant(s)]
-    # Fall back to full text if filter is too aggressive (< 2 sentences retained).
     filtered_reference = (
         " ".join(relevant_sentences)
         if len(relevant_sentences) >= 2
         else hospital_course
     )
 
-    # ------------------------------------------------------------------
-    # 2. ROUGE-L against filtered reference
-    # ------------------------------------------------------------------
     if filtered_reference and generated:
         _scorer = _rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
         rouge_l = _scorer.score(filtered_reference, generated)["rougeL"].fmeasure
     else:
         rouge_l = 0.0
 
-    # ------------------------------------------------------------------
-    # 3. BERTScore F1 (distilbert-base-uncased, CPU)
-    # ------------------------------------------------------------------
     bertscore_f1 = 0.0
     if filtered_reference and generated:
         try:
-            from bert_score import score as _bert_score  # lazy import
+            from bert_score import score as _bert_score
 
             P, R, F = _bert_score(
                 [generated],
@@ -475,60 +322,51 @@ def score_summary_record(
                 device="cpu",
             )
             bertscore_f1 = float(F[0].item())
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _log.warning("BERTScore failed: %s — setting bertscore_f1=0.0", exc)
 
-    # ------------------------------------------------------------------
-    # 4. Clinical coverage metrics
-    # ------------------------------------------------------------------
     gen_lower = generated.lower()
 
-    # 4a. problem_coverage
     if active_problems:
         problem_names = []
         for prob in active_problems:
             name = prob.get("description", "") or prob.get("problem", "") or prob.get("name", "")
             if name:
-                # Strip ICD suffix like "(ICD-9: 518.81)" for matching
                 name = re.sub(r"\s*\(ICD-9:[^)]+\)", "", name).strip().lower()
                 problem_names.append(name)
         if problem_names:
-            hits = sum(1 for n in problem_names if n and n in gen_lower)
+            hits             = sum(1 for n in problem_names if n and n in gen_lower)
             problem_coverage = hits / len(problem_names)
         else:
             problem_coverage = 0.0
     else:
         problem_coverage = 0.0
 
-    # 4b. key_lab_coverage — out-of-range labs from source_facts
     oor_lab_keys: list[str] = []
     for fact in source_facts:
         if _OOR_SUFFIX in fact:
-            # "Heart Rate was 130 [OUT_OF_RANGE]" → key = "heart rate"
             parts = fact.split(" was ", 1)
             if parts:
                 oor_lab_keys.append(parts[0].strip().lower())
 
     if oor_lab_keys:
-        hits = sum(1 for k in oor_lab_keys if k in gen_lower)
+        hits             = sum(1 for k in oor_lab_keys if k in gen_lower)
         key_lab_coverage = hits / len(oor_lab_keys)
     else:
-        key_lab_coverage = 1.0  # no abnormals → full credit (not penalised)
+        key_lab_coverage = 1.0
 
-    # 4c. medication_accuracy — medications from source_facts
     med_names: list[str] = []
     for fact in source_facts:
         if _MED_MARKER in fact:
-            # "Morphine 2 mg administered via IV" → key = "morphine"
             tokens = fact.split()
             if tokens:
                 med_names.append(tokens[0].lower())
 
     if med_names:
-        hits = sum(1 for m in med_names if m in gen_lower)
+        hits                = sum(1 for m in med_names if m in gen_lower)
         medication_accuracy = hits / len(med_names)
     else:
-        medication_accuracy = 1.0  # no meds → full credit
+        medication_accuracy = 1.0
 
     return {
         "rouge_l":             round(rouge_l, 6),
@@ -542,13 +380,9 @@ def score_summary_record(
 def compute_corpus_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate per-record evaluation scores to corpus-level mean ± std.
 
-    Handles both Sub-task 1 (notes) and Sub-task 2 (abnormal) eval records
-    automatically by only summarising metrics that are present in the data.
-
     Args:
-        records: List of per-record dicts as produced by :func:`score_record`
-            or :func:`score_abnormal_record`, augmented with ``note_id``,
-            ``model_id``, and truncation counts.
+        records: List of per-record dicts from :func:`score_record` or
+            :func:`score_abnormal_record`.
 
     Returns:
         Summary dict with ``model_id``, ``n_records``, ``n_truncated``, and
@@ -557,7 +391,7 @@ def compute_corpus_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     if not records:
         return {}
 
-    model_id = records[0].get("model_id", "unknown")
+    model_id    = records[0].get("model_id", "unknown")
     n_truncated = sum(
         1 for r in records
         if r.get("truncated_obs", 0) > 0
@@ -572,21 +406,18 @@ def compute_corpus_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
     _ALL_METRICS = (
-        # Sub-task 1 (notes)
         "rouge_l",
         "entity_precision", "entity_recall", "entity_f1",
         "entity_f1_drugs", "entity_f1_diagnoses", "entity_f1_vitals",
         "aarp_score",
-        # Sub-task 2 (abnormal)
         "abnormal_precision", "abnormal_recall", "abnormal_f1",
-        # Sub-task 3 (summary)
         "bertscore_f1", "problem_coverage", "key_lab_coverage", "medication_accuracy",
     )
 
     for metric in _ALL_METRICS:
         vals = [r[metric] for r in records if metric in r]
         if not vals:
-            continue   # omit absent metrics rather than emitting nulls
+            continue
         summary[metric] = {
             "mean": round(statistics.mean(vals), 6),
             "std":  round(statistics.pstdev(vals), 6),
@@ -601,20 +432,19 @@ def wilcoxon_compare(
 ) -> list[dict[str, Any]]:
     """Paired Wilcoxon signed-rank test for continuous metrics.
 
-    Records are matched by ``note_id``.  Only note IDs present in both lists
-    are included in the analysis.
+    Records are matched by ``note_id``.
 
     Args:
-        records_a: Per-record eval dicts for model A (e.g. medgemma).
-        records_b: Per-record eval dicts for model B (e.g. gemma-3).
+        records_a: Per-record eval dicts for model A.
+        records_b: Per-record eval dicts for model B.
 
     Returns:
-        List of result dicts, one per metric, with keys:
-        ``metric``, ``model_a_mean``, ``model_b_mean``, ``delta``,
-        ``n_pairs``, ``wilcoxon_p``, ``effect_r``, ``significant``.
+        List of result dicts with keys ``metric``, ``model_a_mean``,
+        ``model_b_mean``, ``delta``, ``n_pairs``, ``wilcoxon_p``,
+        ``effect_r``, ``significant``.
     """
-    a_by_id = {r["note_id"]: r for r in records_a}
-    b_by_id = {r["note_id"]: r for r in records_b}
+    a_by_id    = {r["note_id"]: r for r in records_a}
+    b_by_id    = {r["note_id"]: r for r in records_b}
     common_ids = sorted(set(a_by_id) & set(b_by_id))
 
     if not common_ids:
@@ -623,12 +453,9 @@ def wilcoxon_compare(
 
     results = []
     _WILCOXON_METRICS = (
-        # Sub-task 1
         "rouge_l", "entity_f1", "aarp_score",
         "entity_f1_drugs", "entity_f1_diagnoses", "entity_f1_vitals",
-        # Sub-task 2
         "abnormal_f1", "abnormal_precision", "abnormal_recall",
-        # Sub-task 3
         "bertscore_f1", "problem_coverage", "key_lab_coverage", "medication_accuracy",
     )
     for metric in _WILCOXON_METRICS:
@@ -639,15 +466,12 @@ def wilcoxon_compare(
             _log.warning("wilcoxon_compare: too few pairs for %s (%d).", metric, len(a_vals))
             continue
 
-        diffs = [a - b for a, b in zip(a_vals, b_vals)]
-        stat, p = _scipy_wilcoxon(diffs, alternative="two-sided", zero_method="wilcox")
-
-        # Rank-biserial correlation: r = 1 - (2W / n(n+1))
-        n = len(diffs)
-        effect_r = 1.0 - (2 * stat) / (n * (n + 1))
-
-        mean_a = statistics.mean(a_vals)
-        mean_b = statistics.mean(b_vals)
+        diffs      = [a - b for a, b in zip(a_vals, b_vals)]
+        stat, p    = _scipy_wilcoxon(diffs, alternative="two-sided", zero_method="wilcox")
+        n          = len(diffs)
+        effect_r   = 1.0 - (2 * stat) / (n * (n + 1))
+        mean_a     = statistics.mean(a_vals)
+        mean_b     = statistics.mean(b_vals)
         results.append({
             "metric":       metric,
             "model_a_mean": round(mean_a, 6),
@@ -660,11 +484,6 @@ def wilcoxon_compare(
         })
 
     return results
-
-
-# ---------------------------------------------------------------------------
-# I/O helpers
-# ---------------------------------------------------------------------------
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -692,7 +511,6 @@ def _print_summary_table(summary: dict[str, Any]) -> None:
     print(f"  {'Metric':<26}  {'Mean':>8}  {'Std':>8}")
     print(f"  {'-'*26}  {'-'*8}  {'-'*8}")
     _ALL_DISPLAY = [
-        # Sub-task 1
         ("rouge_l",              "ROUGE-L"),
         ("entity_precision",     "Entity Precision"),
         ("entity_recall",        "Entity Recall"),
@@ -701,11 +519,9 @@ def _print_summary_table(summary: dict[str, Any]) -> None:
         ("entity_f1_diagnoses",  "Entity F1 (diagnoses)"),
         ("entity_f1_vitals",     "Entity F1 (vitals)"),
         ("aarp_score",           "AARP Section Score"),
-        # Sub-task 2
         ("abnormal_precision",   "Abnormal Precision"),
         ("abnormal_recall",      "Abnormal Recall"),
         ("abnormal_f1",          "Abnormal F1"),
-        # Sub-task 3
         ("bertscore_f1",         "BERTScore F1"),
         ("problem_coverage",     "Problem Coverage"),
         ("key_lab_coverage",     "Key Lab Coverage"),
@@ -714,7 +530,7 @@ def _print_summary_table(summary: dict[str, Any]) -> None:
     for key, label in _ALL_DISPLAY:
         v = summary.get(key)
         if v is None:
-            continue   # skip metrics not present in this run
+            continue
         mean_s = f"{v['mean']:.4f}" if v.get("mean") is not None else "   N/A  "
         std_s  = f"{v['std']:.4f}"  if v.get("std")  is not None else "   N/A  "
         print(f"  {label:<26}  {mean_s:>8}  {std_s:>8}")
@@ -739,39 +555,24 @@ def _print_comparison_table(comparison: dict[str, Any]) -> None:
     print()
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-
 def _main(argv: list[str] | None = None) -> None:
-    """CLI entry point for Phase 3 evaluation.
-
-    Args:
-        argv: Argument list (defaults to sys.argv[1:]).
-    """
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Phase 3: score inference output and compare models."
+        description=""
     )
     subparsers = parser.add_subparsers(dest="mode")
 
-    # --- score mode (default) ---
     score_p = subparsers.add_parser("score", help="Score one inference file.")
     score_p.add_argument("--inference", required=True, type=Path)
     score_p.add_argument("--reference", required=True, type=Path)
 
-    # --- compare mode ---
     cmp_p = subparsers.add_parser("compare", help="Compare two eval files.")
     cmp_p.add_argument("--eval-a",  required=True, type=Path)
     cmp_p.add_argument("--eval-b",  required=True, type=Path)
 
-    # Support legacy flat args (no subcommand) for backwards compat with
-    # the original single-mode interface.
     args, _ = parser.parse_known_args(argv)
     if args.mode is None:
-        # Re-parse as score mode.
         score_p.set_defaults(mode="score")
         args = score_p.parse_args(argv)
         args.mode = "score"
@@ -786,8 +587,8 @@ def _run_score(args: Any) -> None:
     inf_path: Path = args.inference
     ref_path: Path = args.reference
 
-    stem = inf_path.stem
-    slug = stem[len("inference_"):] if stem.startswith("inference_") else stem
+    stem    = inf_path.stem
+    slug    = stem[len("inference_"):] if stem.startswith("inference_") else stem
     out_dir = inf_path.parent
 
     eval_path    = out_dir / f"eval_{slug}.jsonl"
@@ -809,20 +610,17 @@ def _run_score(args: Any) -> None:
         if "metadata" in r
     }
 
-    # Detect task from first inference record
     is_abnormal_task = bool(inf_records and "gt_flags" in inf_records[0])
     is_summary_task  = bool(inf_records and "hospital_course" in inf_records[0] and not is_abnormal_task)
     if is_abnormal_task:
-        _log.info("Detected Sub-task 2 (abnormal) inference file — using score_abnormal_record.")
+        _log.info("Detected Sub-task 2 (abnormal) inference file.")
     elif is_summary_task:
-        _log.info("Detected Sub-task 3 (summary) inference file — using score_summary_record.")
+        _log.info("Detected Sub-task 3 (summary) inference file.")
 
-    # Build source lookup for Sub-task 3 coverage metrics
     src_by_id: dict[int, dict] = {
         r["metadata"]["note_id"]: r for r in ref_records if "metadata" in r
     }
 
-    # scispaCy is only needed for Sub-task 1 (notes)
     nlp = None
     if not is_abnormal_task and not is_summary_task:
         _log.info(
@@ -840,9 +638,9 @@ def _run_score(args: Any) -> None:
 
         if is_abnormal_task:
             gt_flags = inf_rec.get("gt_flags", [])
-            scores = score_abnormal_record(gen_text, gt_flags)
+            scores   = score_abnormal_record(gen_text, gt_flags)
             eval_records.append({
-                "note_id":              note_id,
+                "note_id":             note_id,
                 "hadm_id":             inf_rec.get("hadm_id"),
                 "subject_id":          inf_rec.get("subject_id"),
                 "model_id":            inf_rec.get("model_id", ""),
@@ -857,7 +655,7 @@ def _run_score(args: Any) -> None:
             })
         elif is_summary_task:
             hospital_course = inf_rec.get("hospital_course", "")
-            src_rec = src_by_id.get(note_id, {})
+            src_rec         = src_by_id.get(note_id, {})
             source_facts    = src_rec.get("source_facts", [])
             active_problems = src_rec.get("active_problems", [])
             scores = score_summary_record(
@@ -867,18 +665,18 @@ def _run_score(args: Any) -> None:
                 active_problems=active_problems,
             )
             eval_records.append({
-                "note_id":             note_id,
-                "hadm_id":            inf_rec.get("hadm_id"),
-                "subject_id":         inf_rec.get("subject_id"),
-                "model_id":           inf_rec.get("model_id", ""),
-                "rouge_l":            scores["rouge_l"],
-                "bertscore_f1":       scores["bertscore_f1"],
-                "problem_coverage":   scores["problem_coverage"],
-                "key_lab_coverage":   scores["key_lab_coverage"],
+                "note_id":              note_id,
+                "hadm_id":             inf_rec.get("hadm_id"),
+                "subject_id":          inf_rec.get("subject_id"),
+                "model_id":            inf_rec.get("model_id", ""),
+                "rouge_l":             scores["rouge_l"],
+                "bertscore_f1":        scores["bertscore_f1"],
+                "problem_coverage":    scores["problem_coverage"],
+                "key_lab_coverage":    scores["key_lab_coverage"],
                 "medication_accuracy": scores["medication_accuracy"],
-                "truncated_obs":      inf_rec.get("truncated_obs", 0),
-                "truncated_labs":     inf_rec.get("truncated_labs", 0),
-                "truncated_meds":     inf_rec.get("truncated_meds", 0),
+                "truncated_obs":       inf_rec.get("truncated_obs", 0),
+                "truncated_labs":      inf_rec.get("truncated_labs", 0),
+                "truncated_meds":      inf_rec.get("truncated_meds", 0),
             })
         else:
             gt_text = gt_by_id.get(note_id, "")
@@ -888,21 +686,21 @@ def _run_score(args: Any) -> None:
 
             scores = score_record(gen_text, gt_text, nlp, ap_by_id.get(note_id))
             eval_records.append({
-                "note_id":               note_id,
-                "hadm_id":              inf_rec.get("hadm_id"),
-                "subject_id":           inf_rec.get("subject_id"),
-                "model_id":             inf_rec.get("model_id", ""),
-                "rouge_l":              scores["rouge_l"],
-                "entity_precision":     scores["entity_precision"],
-                "entity_recall":        scores["entity_recall"],
-                "entity_f1":            scores["entity_f1"],
-                "entity_f1_drugs":      scores["entity_f1_drugs"],
-                "entity_f1_diagnoses":  scores["entity_f1_diagnoses"],
-                "entity_f1_vitals":     scores["entity_f1_vitals"],
-                "aarp_score":           scores["aarp_score"],
-                "truncated_obs":        inf_rec.get("truncated_obs", 0),
-                "truncated_labs":       inf_rec.get("truncated_labs", 0),
-                "truncated_meds":       inf_rec.get("truncated_meds", 0),
+                "note_id":              note_id,
+                "hadm_id":             inf_rec.get("hadm_id"),
+                "subject_id":          inf_rec.get("subject_id"),
+                "model_id":            inf_rec.get("model_id", ""),
+                "rouge_l":             scores["rouge_l"],
+                "entity_precision":    scores["entity_precision"],
+                "entity_recall":       scores["entity_recall"],
+                "entity_f1":           scores["entity_f1"],
+                "entity_f1_drugs":     scores["entity_f1_drugs"],
+                "entity_f1_diagnoses": scores["entity_f1_diagnoses"],
+                "entity_f1_vitals":    scores["entity_f1_vitals"],
+                "aarp_score":          scores["aarp_score"],
+                "truncated_obs":       inf_rec.get("truncated_obs", 0),
+                "truncated_labs":      inf_rec.get("truncated_labs", 0),
+                "truncated_meds":      inf_rec.get("truncated_meds", 0),
             })
 
         if i % 50 == 0 or i == len(inf_records):
@@ -920,8 +718,8 @@ def _run_score(args: Any) -> None:
 
 
 def _run_compare(args: Any) -> None:
-    eval_a = _load_jsonl(args.eval_a)
-    eval_b = _load_jsonl(args.eval_b)
+    eval_a  = _load_jsonl(args.eval_a)
+    eval_b  = _load_jsonl(args.eval_b)
 
     model_a = eval_a[0].get("model_id", str(args.eval_a)) if eval_a else str(args.eval_a)
     model_b = eval_b[0].get("model_id", str(args.eval_b)) if eval_b else str(args.eval_b)
@@ -929,9 +727,8 @@ def _run_compare(args: Any) -> None:
     _log.info("Running Wilcoxon comparison …")
     metric_results = wilcoxon_compare(eval_a, eval_b)
 
-    # Derive output path from the two input stems.
-    stem_a = args.eval_a.stem[len("eval_"):] if args.eval_a.stem.startswith("eval_") else args.eval_a.stem
-    stem_b = args.eval_b.stem[len("eval_"):] if args.eval_b.stem.startswith("eval_") else args.eval_b.stem
+    stem_a   = args.eval_a.stem[len("eval_"):] if args.eval_a.stem.startswith("eval_") else args.eval_a.stem
+    stem_b   = args.eval_b.stem[len("eval_"):] if args.eval_b.stem.startswith("eval_") else args.eval_b.stem
     out_path = args.eval_a.parent / f"comparison_{stem_a}_vs_{stem_b}.json"
 
     n_pairs = len({r["note_id"] for r in eval_a} & {r["note_id"] for r in eval_b})

@@ -1,30 +1,16 @@
-"""Phase 1 ETL pipeline: MIMIC-III → FHIR-lite JSONL.
-
-Two-pass architecture with Parquet intermediaries:
+"""Two-pass architecture with Parquet intermediaries:
 
 Pass 1 (``--extract``):
     Scan each raw CSV.gz once, filter to MICU admissions, and write a
-    compact Parquet file to ``data/intermediate/``.  Peak memory is bounded
-    by the largest single table (~19 M CHARTEVENTS rows ≈ 3 GB), which is
-    fully freed before the next table is processed.
+    compact Parquet file to ``data/intermediate/``.
 
 Pass 2 (``--process``):
-    Read exclusively from Parquet (seekable, ~10× faster than gz re-scan).
-    Process ``hadm_id`` batches from columnar Parquet with predicate
-    pushdown; resolve item labels and harmonisation from small in-memory
-    DataFrames (12 k rows); stream validated FHIR-lite records to JSONL.
+    Read from Parquet with predicate pushdown; resolve item labels and
+    harmonisation from small in-memory DataFrames; stream validated
+    FHIR-lite records to JSONL.
 
 Pass 3 (``--split``):
-    Patient-level train/val/test split of the JSONL output.  Two-pass
-    streaming — no full file held in RAM.
-
-Design principles:
-- No single ``collect()`` spans more than one source table at a time.
-- Label/harmonisation CSVs (tiny) are collected once and reused in-memory.
-- ``--resume`` skips already-processed admissions on crash/restart.
-- ``--sample N`` caps ``--process`` to the first N admissions (CI/smoke).
-- All CPU cores used by Polars default multi-threaded scheduler.
-- No GPU resources consumed; VRAM preserved for Phase 2 (vLLM).
+    Patient-level train/val/test split of the JSONL output.
 """
 
 import argparse
@@ -51,9 +37,6 @@ from src.etl.schemas import (
     ProcedureEvent,
 )
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -61,15 +44,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Path constants
-# ---------------------------------------------------------------------------
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 _MIMIC_DIR = _DATA_DIR / "MIMICIII"
 _INT_DIR   = _DATA_DIR / "intermediate"
 _OUT_DIR   = _DATA_DIR / "processed"
 
-# Raw source files
 NOTEEVENTS_PATH         = _MIMIC_DIR / "NOTEEVENTS.csv.gz"
 CHARTEVENTS_PATH        = _MIMIC_DIR / "CHARTEVENTS.csv.gz"
 LABEVENTS_PATH          = _MIMIC_DIR / "LABEVENTS.csv.gz"
@@ -85,7 +64,6 @@ PROCEDUREEVENTS_MV_PATH = _MIMIC_DIR / "PROCEDUREEVENTS_MV.csv.gz"
 ITEM_MAP_PATH           = _MIMIC_DIR / "itemid_to_variable_map.csv"
 VARIABLE_RANGES_PATH    = _MIMIC_DIR / "variable_ranges.csv"
 
-# Parquet intermediaries (Pass 1 output / Pass 2 input)
 COHORT_PARQUET     = _INT_DIR / "cohort.parquet"
 CHART_PARQUET      = _INT_DIR / "chart_micu.parquet"
 LAB_PARQUET        = _INT_DIR / "lab_micu.parquet"
@@ -95,12 +73,8 @@ ADMISSIONS_PARQUET = _INT_DIR / "admissions.parquet"
 DIAGNOSES_PARQUET  = _INT_DIR / "diagnoses.parquet"
 DISCHARGE_PARQUET  = _INT_DIR / "discharge_summaries.parquet"
 
-# Final output
 OUTPUT_PATH = _OUT_DIR / "fhir_lite.jsonl"
 
-# ---------------------------------------------------------------------------
-# MIMIC-Extract resource URLs (Wang et al., CHIL 2020 — arXiv:1907.08322)
-# ---------------------------------------------------------------------------
 _MIMIC_EXTRACT_BASE = (
     "https://raw.githubusercontent.com/MLforHealth/MIMIC_Extract/master/resources"
 )
@@ -109,42 +83,22 @@ _MIMIC_EXTRACT_RESOURCES = {
     VARIABLE_RANGES_PATH: f"{_MIMIC_EXTRACT_BASE}/variable_ranges.csv",
 }
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-_WINDOW_HOURS: int   = 12
-_MIN_WORD_COUNT: int = 50
-_MIN_DENSITY: int    = 5
+_WINDOW_HOURS: int    = 12
+_MIN_WORD_COUNT: int  = 50
+_MIN_DENSITY: int     = 5
 _TARGET_CAREUNIT: str = "MICU"
 
-# Regex matching monitor alarm/alert threshold entries — not physiological
-# observations; excluded from the events surfaced to the model.
 _METRIC_DENYLIST_RE: str = r"(?i)\balarm\b|\balert\b"
 
-# Group keys used when aggregating per-note event lists.
-# NOTE: "text" is intentionally excluded to avoid duplicating multi-KB note
-# strings across every intermediate join row (~48M rows × 2 KB = 96 GB OOM).
-# Text is re-joined onto the aggregated result after group_by().
 _GROUP_KEYS: List[str] = ["note_id", "subject_id", "hadm_id", "careunit"]
-
-
-# ---------------------------------------------------------------------------
-# Step 0: MIMIC-Extract resource download
-# ---------------------------------------------------------------------------
 
 
 def download_mimic_extract_resources(force: bool = False) -> None:
     """Download MIMIC-Extract reference files from GitHub if not already present.
 
-    Fetches two files from the MLforHealth/MIMIC_Extract repository
-    (Wang et al., CHIL 2020, arXiv:1907.08322):
-
-    - ``itemid_to_variable_map.csv`` — canonical ITEMID → variable name
-      mapping used to harmonise CareVue and MetaVision ITEMIDs.
-    - ``variable_ranges.csv`` — per-variable physiological plausible range
-      bounds used to flag out-of-range values.
-
-    Files are written to ``data/MIMICIII/``.
+    Fetches ``itemid_to_variable_map.csv`` and ``variable_ranges.csv`` from
+    the MLforHealth/MIMIC_Extract repository and writes them to
+    ``data/MIMICIII/``.
 
     Args:
         force: Re-download even if files already exist on disk.
@@ -154,7 +108,7 @@ def download_mimic_extract_resources(force: bool = False) -> None:
         if dest_path.exists() and not force:
             logger.info("Resource already present, skipping: %s", dest_path.name)
             continue
-        logger.info("Downloading %s → %s", url, dest_path)
+        logger.info("Downloading %s -> %s", url, dest_path)
         try:
             urllib.request.urlretrieve(url, dest_path)
             logger.info("Downloaded %s (%d bytes)", dest_path.name, dest_path.stat().st_size)
@@ -163,13 +117,8 @@ def download_mimic_extract_resources(force: bool = False) -> None:
             raise
 
 
-# ---------------------------------------------------------------------------
-# Label / harmonisation / range-bounds loaders (small CSVs → in-memory)
-# ---------------------------------------------------------------------------
-
-
 def load_item_labels() -> pl.LazyFrame:
-    """Load D_ITEMS: ITEMID → human-readable label for CHARTEVENTS/INPUTEVENTS.
+    """Load D_ITEMS: ITEMID  label for CHARTEVENTS/INPUTEVENTS.
 
     Returns:
         LazyFrame with columns ``item_id`` (Int64) and ``metric`` (Utf8).
@@ -183,7 +132,7 @@ def load_item_labels() -> pl.LazyFrame:
 
 
 def load_lab_item_labels() -> pl.LazyFrame:
-    """Load D_LABITEMS: ITEMID → human-readable label for LABEVENTS.
+    """Load D_LABITEMS: ITEMID -> label for LABEVENTS.
 
     Returns:
         LazyFrame with columns ``item_id`` (Int64) and ``metric`` (Utf8).
@@ -197,7 +146,7 @@ def load_lab_item_labels() -> pl.LazyFrame:
 
 
 def load_item_harmonisation_map() -> Optional[pl.LazyFrame]:
-    """Load the MIMIC-Extract ITEMID → canonical variable name map.
+    """Load the MIMIC-Extract ITEMID -> canonical variable name map.
 
     Returns:
         LazyFrame with columns ``item_id`` (Int64) and
@@ -247,11 +196,6 @@ def load_range_bounds() -> Optional[pl.LazyFrame]:
     )
 
 
-# ---------------------------------------------------------------------------
-# ISO 8601 relative offset expression
-# ---------------------------------------------------------------------------
-
-
 def iso8601_relative_expr(
     note_time_col: str = "note_time",
     event_time_col: str = "event_time",
@@ -263,7 +207,7 @@ def iso8601_relative_expr(
         event_time_col: Name of the event timestamp column.
 
     Returns:
-        A Polars ``Expr`` that evaluates to a ``Utf8`` column named ``time``.
+        A Polars ``Expr`` evaluating to a ``Utf8`` column named ``time``.
     """
     total_minutes: pl.Expr = (
         (pl.col(note_time_col) - pl.col(event_time_col))
@@ -277,11 +221,6 @@ def iso8601_relative_expr(
     ).alias("time")
 
 
-# ---------------------------------------------------------------------------
-# Temporal window join helpers
-# ---------------------------------------------------------------------------
-
-
 def apply_temporal_window(
     cohort_lf: pl.LazyFrame,
     events_lf: pl.LazyFrame,
@@ -291,29 +230,20 @@ def apply_temporal_window(
 ) -> pl.LazyFrame:
     """Inner-join events to nursing notes within the 12-hour look-back window.
 
-    Retains event rows where ``note_time - 12h <= event_time <= note_time``.
-    Applies ITEMID harmonisation and physiological range flagging when the
-    corresponding reference frames are provided.
-
-    ``events_lf`` is expected to already be pre-filtered to the batch's
-    ``hadm_id`` set (i.e. read from Parquet with a filter predicate).
-
     Args:
         cohort_lf: Nursing cohort LazyFrame for the current batch.
-        events_lf: CHARTEVENTS or LABEVENTS LazyFrame (pre-filtered).
+        events_lf: CHARTEVENTS or LABEVENTS LazyFrame (pre-filtered to batch).
         item_labels_lf: D_ITEMS or D_LABITEMS label LazyFrame.
-        harmonisation_lf: Optional ITEMID → canonical name map.
+        harmonisation_lf: Optional ITEMID -> canonical name map.
         range_bounds_lf: Optional per-variable plausible range bounds.
 
     Returns:
         LazyFrame with columns: ``note_id``, ``subject_id``, ``hadm_id``,
-        ``careunit``, ``note_time``, ``text``, ``event_time``, ``metric``,
+        ``careunit``, ``note_time``, ``event_time``, ``metric``,
         ``val``, ``val_type``, ``unit``, ``time``, ``out_of_range``.
     """
     window_td = pl.duration(hours=_WINDOW_HOURS)
 
-    # Drop text before the join to avoid carrying multi-KB strings through
-    # every intermediate row (join expansion can reach 48M+ rows, causing OOM).
     cohort_slim_lf = cohort_lf.drop("text")
 
     events_parsed = events_lf.with_columns(
@@ -401,9 +331,6 @@ def apply_temporal_window_medications(
 ) -> pl.LazyFrame:
     """Inner-join INPUTEVENTS to nursing notes within the 12-hour window.
 
-    ``inputevents_lf`` is expected to already be pre-filtered to the batch's
-    ``hadm_id`` set.
-
     Args:
         cohort_lf: Nursing cohort LazyFrame for the current batch.
         inputevents_lf: INPUTEVENTS LazyFrame (pre-filtered to batch hadm_ids).
@@ -411,12 +338,11 @@ def apply_temporal_window_medications(
 
     Returns:
         LazyFrame with columns: ``note_id``, ``subject_id``, ``hadm_id``,
-        ``careunit``, ``note_time``, ``text``, ``event_time``, ``drug``,
+        ``careunit``, ``note_time``, ``event_time``, ``drug``,
         ``amount``, ``unit``, ``route``, ``time``.
     """
     window_td = pl.duration(hours=_WINDOW_HOURS)
 
-    # Drop text before join to prevent OOM from text duplication.
     cohort_slim_lf = cohort_lf.drop("text")
 
     events_parsed = inputevents_lf.with_columns(
@@ -455,22 +381,18 @@ def apply_temporal_window_procedures(
 ) -> pl.LazyFrame:
     """Inner-join PROCEDUREEVENTS_MV to nursing notes within the 12-hour window.
 
-    ``procedureevents_lf`` is expected to already be pre-filtered to the
-    batch's ``hadm_id`` set.
-
     Args:
         cohort_lf: Nursing cohort LazyFrame for the current batch.
-        procedureevents_lf: PROCEDUREEVENTS_MV LazyFrame (pre-filtered).
+        procedureevents_lf: PROCEDUREEVENTS_MV LazyFrame (pre-filtered to batch).
         item_labels_lf: D_ITEMS label LazyFrame.
 
     Returns:
         LazyFrame with columns: ``note_id``, ``subject_id``, ``hadm_id``,
-        ``careunit``, ``note_time``, ``text``, ``event_time``,
+        ``careunit``, ``note_time``, ``event_time``,
         ``procedure``, ``duration_min``, ``status``, ``time``.
     """
     window_td = pl.duration(hours=_WINDOW_HOURS)
 
-    # Drop text before join to prevent OOM from text duplication.
     cohort_slim_lf = cohort_lf.drop("text")
 
     events_parsed = procedureevents_lf.with_columns(
@@ -501,18 +423,11 @@ def apply_temporal_window_procedures(
     )
 
 
-# ---------------------------------------------------------------------------
-# Pydantic helper builders
-# ---------------------------------------------------------------------------
-
-
 def _build_observation_list(raw: List[Dict]) -> List[ObservationEntry]:
-    """Convert raw struct dicts to validated ObservationEntry objects."""
     return [ObservationEntry(**e) for e in raw]
 
 
 def _build_active_problem_list(raw: List[Dict]) -> List[ActiveProblem]:
-    """Convert raw struct dicts to validated ActiveProblem objects, skipping bad rows."""
     result: List[ActiveProblem] = []
     for e in raw:
         try:
@@ -523,12 +438,10 @@ def _build_active_problem_list(raw: List[Dict]) -> List[ActiveProblem]:
 
 
 def _build_medication_list(raw: List[Dict]) -> List[MedicationEvent]:
-    """Convert raw struct dicts to validated MedicationEvent objects."""
     return [MedicationEvent(**e) for e in raw]
 
 
 def _build_procedure_list(raw: List[Dict]) -> List[ProcedureEvent]:
-    """Convert raw struct dicts to validated ProcedureEvent objects."""
     return [ProcedureEvent(**e) for e in raw]
 
 
@@ -574,31 +487,14 @@ def _build_source_facts(
     return facts
 
 
-# ---------------------------------------------------------------------------
-# Pass 1 — extract_intermediaries
-# ---------------------------------------------------------------------------
-
-
 def extract_intermediaries(force: bool = False) -> None:
     """Extract MICU-relevant subsets of all source tables to Parquet.
-
-    Processes each source table in isolation (one scan, one write, memory
-    freed before the next step).  If a Parquet file already exists and
-    ``force`` is False, that step is skipped.
-
-    Intermediate files are written to ``data/intermediate/``.
-
-    Gate counts (nursing_raw, after_wc, after_icu) are logged for the ACM
-    methodology section.
 
     Args:
         force: Re-write Parquet files even if they already exist on disk.
     """
     _INT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Step 1: ICUSTAYS → collect MICU hadm_ids (tiny, ~9 k rows)
-    # ------------------------------------------------------------------
     logger.info("Extract Step 1/8: scanning ICUSTAYS for MICU hadm_ids …")
     micu_hadm_ids: List[int] = (
         pl.scan_csv(ICUSTAYS_PATH, infer_schema_length=5_000)
@@ -610,13 +506,9 @@ def extract_intermediaries(force: bool = False) -> None:
     )
     logger.info("  MICU admissions found: %d", len(micu_hadm_ids))
 
-    # Helper: a tiny LazyFrame of just the hadm_id list for semi-joins.
     def _hadm_lf() -> pl.LazyFrame:
         return pl.LazyFrame({"hadm_id": micu_hadm_ids})
 
-    # ------------------------------------------------------------------
-    # Step 2: NOTEEVENTS → cohort.parquet
-    # ------------------------------------------------------------------
     if COHORT_PARQUET.exists() and not force:
         logger.info("Extract Step 2/8: cohort.parquet exists, skipping.")
     else:
@@ -632,7 +524,6 @@ def extract_intermediaries(force: bool = False) -> None:
             ]
         )
 
-        # Gate counts in one scan.
         gate_df = (
             notes_lf.filter(pl.col("category") == "Nursing")
             .with_columns(pl.col("text").str.split(" ").list.len().alias("wc"))
@@ -645,7 +536,6 @@ def extract_intermediaries(force: bool = False) -> None:
         nursing_raw: int = gate_df["nursing_raw"][0]
         after_wc: int    = gate_df["after_wc"][0]
 
-        # ICU stays for temporal bounds check.
         icu_lf = (
             pl.scan_csv(ICUSTAYS_PATH, infer_schema_length=5_000)
             .filter(pl.col("FIRST_CAREUNIT") == _TARGET_CAREUNIT)
@@ -683,12 +573,9 @@ def extract_intermediaries(force: bool = False) -> None:
             nursing_raw, _MIN_WORD_COUNT, after_wc, after_icu,
         )
         cohort_df.write_parquet(COHORT_PARQUET, compression="zstd")
-        logger.info("  → %s (%s)", COHORT_PARQUET.name, _fmt_size(COHORT_PARQUET))
+        logger.info("  -> %s (%s)", COHORT_PARQUET.name, _fmt_size(COHORT_PARQUET))
         del cohort_df
 
-    # ------------------------------------------------------------------
-    # Step 3: CHARTEVENTS → chart_micu.parquet
-    # ------------------------------------------------------------------
     if CHART_PARQUET.exists() and not force:
         logger.info("Extract Step 3/8: chart_micu.parquet exists, skipping.")
     else:
@@ -712,12 +599,9 @@ def extract_intermediaries(force: bool = False) -> None:
             .collect()
         )
         df.write_parquet(CHART_PARQUET, compression="zstd")
-        logger.info("  → %s (%s, %d rows)", CHART_PARQUET.name, _fmt_size(CHART_PARQUET), len(df))
+        logger.info("  -> %s (%s, %d rows)", CHART_PARQUET.name, _fmt_size(CHART_PARQUET), len(df))
         del df
 
-    # ------------------------------------------------------------------
-    # Step 4: LABEVENTS → lab_micu.parquet
-    # ------------------------------------------------------------------
     if LAB_PARQUET.exists() and not force:
         logger.info("Extract Step 4/8: lab_micu.parquet exists, skipping.")
     else:
@@ -741,12 +625,9 @@ def extract_intermediaries(force: bool = False) -> None:
             .collect()
         )
         df.write_parquet(LAB_PARQUET, compression="zstd")
-        logger.info("  → %s (%s, %d rows)", LAB_PARQUET.name, _fmt_size(LAB_PARQUET), len(df))
+        logger.info("  -> %s (%s, %d rows)", LAB_PARQUET.name, _fmt_size(LAB_PARQUET), len(df))
         del df
 
-    # ------------------------------------------------------------------
-    # Step 5: INPUTEVENTS_CV + INPUTEVENTS_MV → med_micu.parquet
-    # ------------------------------------------------------------------
     if MED_PARQUET.exists() and not force:
         logger.info("Extract Step 5/8: med_micu.parquet exists, skipping.")
     else:
@@ -791,12 +672,9 @@ def extract_intermediaries(force: bool = False) -> None:
         )
         df = pl.concat([cv_df, mv_df], how="vertical")
         df.write_parquet(MED_PARQUET, compression="zstd")
-        logger.info("  → %s (%s, %d rows)", MED_PARQUET.name, _fmt_size(MED_PARQUET), len(df))
+        logger.info("  -> %s (%s, %d rows)", MED_PARQUET.name, _fmt_size(MED_PARQUET), len(df))
         del cv_df, mv_df, df
 
-    # ------------------------------------------------------------------
-    # Step 6: PROCEDUREEVENTS_MV → proc_micu.parquet
-    # ------------------------------------------------------------------
     if PROC_PARQUET.exists() and not force:
         logger.info("Extract Step 6/8: proc_micu.parquet exists, skipping.")
     else:
@@ -829,12 +707,9 @@ def extract_intermediaries(force: bool = False) -> None:
             .collect()
         )
         df.write_parquet(PROC_PARQUET, compression="zstd")
-        logger.info("  → %s (%s, %d rows)", PROC_PARQUET.name, _fmt_size(PROC_PARQUET), len(df))
+        logger.info("  -> %s (%s, %d rows)", PROC_PARQUET.name, _fmt_size(PROC_PARQUET), len(df))
         del df
 
-    # ------------------------------------------------------------------
-    # Step 7: ADMISSIONS → admissions.parquet
-    # ------------------------------------------------------------------
     if ADMISSIONS_PARQUET.exists() and not force:
         logger.info("Extract Step 7/8: admissions.parquet exists, skipping.")
     else:
@@ -852,12 +727,9 @@ def extract_intermediaries(force: bool = False) -> None:
             .collect()
         )
         df.write_parquet(ADMISSIONS_PARQUET, compression="zstd")
-        logger.info("  → %s (%s, %d rows)", ADMISSIONS_PARQUET.name, _fmt_size(ADMISSIONS_PARQUET), len(df))
+        logger.info("  -> %s (%s, %d rows)", ADMISSIONS_PARQUET.name, _fmt_size(ADMISSIONS_PARQUET), len(df))
         del df
 
-    # ------------------------------------------------------------------
-    # Step 8: DIAGNOSES_ICD + D_ICD_DIAGNOSES → diagnoses.parquet
-    # ------------------------------------------------------------------
     if DIAGNOSES_PARQUET.exists() and not force:
         logger.info("Extract Step 8/8: diagnoses.parquet exists, skipping.")
     else:
@@ -887,19 +759,15 @@ def extract_intermediaries(force: bool = False) -> None:
             .collect()
         )
         df.write_parquet(DIAGNOSES_PARQUET, compression="zstd")
-        logger.info("  → %s (%s, %d rows)", DIAGNOSES_PARQUET.name, _fmt_size(DIAGNOSES_PARQUET), len(df))
+        logger.info("  -> %s (%s, %d rows)", DIAGNOSES_PARQUET.name, _fmt_size(DIAGNOSES_PARQUET), len(df))
         del df
 
-    # ------------------------------------------------------------------
-    # Step 9: NOTEEVENTS (Discharge summary) → discharge_summaries.parquet
-    # ------------------------------------------------------------------
     if DISCHARGE_PARQUET.exists() and not force:
         logger.info("Extract Step 9/9: discharge_summaries.parquet exists, skipping.")
     else:
         logger.info("Extract Step 9/9: extracting discharge summaries …")
 
         def _extract_hospital_course(text: str) -> str:
-            """Return the HOSPITAL COURSE section or full text as fallback."""
             m = re.search(
                 r"(brief\s+hospital\s+course|hospital\s+course)\s*:?\s*(.*?)(?=\n\s*\n[A-Z]|\Z)",
                 text, re.DOTALL | re.IGNORECASE,
@@ -922,7 +790,6 @@ def extract_intermediaries(force: bool = False) -> None:
                     "hospital_course": _extract_hospital_course(row["TEXT"]),
                 })
 
-        # Keep one summary per admission — latest CHARTTIME
         ds_df = (
             pl.DataFrame(rows)
             .sort("charttime", descending=True)
@@ -931,19 +798,12 @@ def extract_intermediaries(force: bool = False) -> None:
         )
         ds_df.write_parquet(DISCHARGE_PARQUET, compression="zstd")
         logger.info(
-            "  → %s (%s, %d admissions with discharge summary)",
+            "  -> %s (%s, %d admissions with discharge summary)",
             DISCHARGE_PARQUET.name, _fmt_size(DISCHARGE_PARQUET), len(ds_df),
         )
         del ds_df, rows
 
-    logger.info(
-        "Extract complete. Intermediate files written to %s", _INT_DIR
-    )
-
-
-# ---------------------------------------------------------------------------
-# Pass 2 — per-batch worker (module-level so multiprocessing can pickle it)
-# ---------------------------------------------------------------------------
+    logger.info("Extract complete. Intermediate files written to %s", _INT_DIR)
 
 
 def _batch_worker(
@@ -962,26 +822,20 @@ def _batch_worker(
 ) -> None:
     """Process a single batch and write QC counters to ``result_path`` as JSON.
 
-    Runs in an isolated subprocess (spawn context) so the OS reclaims all
-    Polars/jemalloc allocator pages when the process exits.  Results are
-    communicated back to the parent by writing a small JSON file.
-
     Args:
         result_path: Temp file path to write the result dict to.
         batch_hadm: List of ``hadm_id`` values for this batch.
-        batch_idx: Zero-based batch index (for logging only).
-        n_batches: Total number of batches (for logging only).
+        batch_idx: Zero-based batch index.
+        n_batches: Total number of batches.
         out_path: JSONL file to append accepted records to.
-        item_labels_df: D_ITEMS label DataFrame (pre-collected).
-        lab_labels_df: D_LABITEMS label DataFrame (pre-collected).
+        item_labels_df: D_ITEMS label DataFrame.
+        lab_labels_df: D_LABITEMS label DataFrame.
         harm_df: Optional harmonisation map DataFrame.
         rang_df: Optional range bounds DataFrame.
         admissions_df: ADMISSIONS reference DataFrame.
         diagnoses_df: DIAGNOSES lookup DataFrame.
-        discharge_df: Discharge summary hospital_course DataFrame (hadm_id →
-            hospital_course).
+        discharge_df: Discharge summary DataFrame (hadm_id -> hospital_course).
     """
-    # Re-import inside subprocess to ensure a clean module state.
     import json as _json
     import polars as _pl
     from pydantic import ValidationError as _ValidationError
@@ -1135,11 +989,6 @@ def _batch_worker(
         ), _rf)
 
 
-# ---------------------------------------------------------------------------
-# Pass 2 — process_batches
-# ---------------------------------------------------------------------------
-
-
 def process_batches(
     batch_size: int = 50,
     resume: bool = False,
@@ -1147,20 +996,10 @@ def process_batches(
 ) -> None:
     """Process Parquet intermediaries into a validated FHIR-lite JSONL file.
 
-    Reads exclusively from ``data/intermediate/`` Parquet files.  Parquet
-    column-predicate pushdown ensures only the rows for each batch's
-    ``hadm_id`` set are decoded, capping peak memory to a single batch
-    (~1 M CHARTEVENTS rows for ``batch_size=500``).
-
-    Item labels and harmonisation maps are tiny CSVs collected once into
-    DataFrames and reused across all batches without re-scanning.
-
     Args:
         batch_size: Number of HADM_IDs to process per batch.
-        resume: When True, read existing output JSONL and skip any
-            ``hadm_id`` already present in it.
-        sample: When set, process only the first ``sample`` admissions
-            (useful for smoke tests).
+        resume: When True, skip ``hadm_id`` values already in the output JSONL.
+        sample: When set, process only the first ``sample`` admissions.
     """
     for p in [COHORT_PARQUET, CHART_PARQUET, LAB_PARQUET, MED_PARQUET,
               PROC_PARQUET, ADMISSIONS_PARQUET, DIAGNOSES_PARQUET, DISCHARGE_PARQUET]:
@@ -1172,9 +1011,6 @@ def process_batches(
 
     _OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Collect small reference tables once.
-    # ------------------------------------------------------------------
     logger.info("Process: loading label / harmonisation / range tables …")
     item_labels_df: pl.DataFrame    = load_item_labels().collect()
     lab_labels_df: pl.DataFrame     = load_lab_item_labels().collect()
@@ -1187,9 +1023,6 @@ def process_batches(
     diagnoses_df:  pl.DataFrame = pl.read_parquet(DIAGNOSES_PARQUET)
     discharge_df:  pl.DataFrame = pl.read_parquet(DISCHARGE_PARQUET)
 
-    # ------------------------------------------------------------------
-    # Build ordered hadm_id work list.
-    # ------------------------------------------------------------------
     all_hadm_ids: List[int] = (
         pl.scan_parquet(COHORT_PARQUET)
         .select(pl.col("hadm_id"))
@@ -1197,15 +1030,12 @@ def process_batches(
         .collect()["hadm_id"]
         .to_list()
     )
-    all_hadm_ids.sort()   # deterministic ordering
+    all_hadm_ids.sort()
 
     if sample is not None:
         all_hadm_ids = all_hadm_ids[:sample]
-        logger.info("Process: --sample %d → limiting to first %d admissions.", sample, len(all_hadm_ids))
+        logger.info("Process: --sample %d -> limiting to first %d admissions.", sample, len(all_hadm_ids))
 
-    # ------------------------------------------------------------------
-    # Resume: skip hadm_ids already written.
-    # ------------------------------------------------------------------
     done_hadm_ids: Set[int] = set()
     if resume and OUTPUT_PATH.exists() and OUTPUT_PATH.stat().st_size > 0:
         with open(OUTPUT_PATH, encoding="utf-8") as fh:
@@ -1232,11 +1062,10 @@ def process_batches(
 
     n_batches = max(1, (len(all_hadm_ids) + batch_size - 1) // batch_size)
     logger.info(
-        "Process: %d admissions → %d batches of ≤%d",
+        "Process: %d admissions -> %d batches of ≤%d",
         len(all_hadm_ids), n_batches, batch_size,
     )
 
-    # ------------------------------------------------------------------
     total_pre    = 0
     total_post   = 0
     accepted     = 0
@@ -1248,16 +1077,12 @@ def process_batches(
     n_with_probs = 0
     n_with_adx   = 0
 
-    # Truncate / touch output file once before the subprocess loop.
     open_mode = "a" if resume else "w"
     with open(OUTPUT_PATH, open_mode, encoding="utf-8"):
-        pass  # create or truncate; batches will append
+        pass
 
     ctx = multiprocessing.get_context("spawn")
 
-    # Run each batch in a fresh subprocess so the OS reclaims all
-    # jemalloc/mimalloc allocator pages when it exits.
-    # Results are communicated via a temp JSON file (no IPC semaphores).
     import tempfile
     result_file = Path(tempfile.mktemp(suffix=".json"))
 
@@ -1278,6 +1103,7 @@ def process_batches(
             raise RuntimeError(
                 f"Batch {batch_idx + 1} subprocess exited with code {p.exitcode}"
             )
+
         with open(result_file) as rf:
             result = json.load(rf)
 
@@ -1299,9 +1125,6 @@ def process_batches(
 
     result_file.unlink(missing_ok=True)
 
-    # ------------------------------------------------------------------
-    # Final summary.
-    # ------------------------------------------------------------------
     logger.info(
         "Density gate (obs+labs+meds >= %d): before=%d | after=%d | discarded=%d",
         _MIN_DENSITY, total_pre, total_post, total_pre - total_post,
@@ -1320,11 +1143,6 @@ def process_batches(
     logger.info("Process complete. %d records written to %s", accepted, OUTPUT_PATH)
 
 
-# ---------------------------------------------------------------------------
-# Pass 3 — split_dataset
-# ---------------------------------------------------------------------------
-
-
 def split_dataset(
     input_path: Path,
     output_dir: Path,
@@ -1333,11 +1151,6 @@ def split_dataset(
     seed: int = 42,
 ) -> None:
     """Partition a FHIR-lite JSONL dataset into patient-level train/val/test splits.
-
-    Splitting is performed at the ``subject_id`` level to prevent a patient's
-    notes from appearing in more than one partition.
-
-    Two-pass streaming — no full file held in RAM simultaneously.
 
     Args:
         input_path: Path to the source FHIR-lite JSONL file.
@@ -1362,7 +1175,6 @@ def split_dataset(
     test_frac = 1.0 - train_frac - val_frac
     logger.info("Split: loading %s (seed=%d) …", jsonl_path, seed)
 
-    # Pass 1: build subject_id index without keeping records in RAM.
     patient_to_lines: Dict[int, List[int]] = {}
     with open(jsonl_path, encoding="utf-8") as fh:
         for lineno, line in enumerate(fh):
@@ -1385,7 +1197,6 @@ def split_dataset(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pass 2: stream records into split files.
     split_counts: Dict[str, int] = {k: 0 for k in split_subjects}
     handles = {
         name: open(output_dir / f"fhir_lite_{name}.jsonl", "w", encoding="utf-8")
@@ -1408,7 +1219,7 @@ def split_dataset(
         n_sids   = len(split_subjects[name])
         out_path = output_dir / f"fhir_lite_{name}.jsonl"
         logger.info(
-            "Split %-5s | patients=%d (%.0f%%) | notes=%d → %s",
+            "Split %-5s | patients=%d (%.0f%%) | notes=%d -> %s",
             name, n_sids, 100.0 * n_sids / n_patients, count, out_path,
         )
     logger.info(
@@ -1417,13 +1228,7 @@ def split_dataset(
     )
 
 
-# ---------------------------------------------------------------------------
-# Internal utility
-# ---------------------------------------------------------------------------
-
-
 def _fmt_size(path: Path) -> str:
-    """Return a human-readable file size string."""
     size = path.stat().st_size
     for unit in ("B", "KB", "MB", "GB"):
         if size < 1024:
@@ -1432,131 +1237,51 @@ def _fmt_size(path: Path) -> str:
     return f"{size:.1f} TB"
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Phase 1 ETL: MIMIC-III → FHIR-lite JSONL (MICU nursing cohort)",
+        description="",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Full end-to-end run:
   python -m src.etl.pipeline --extract --process --split
-
-  # Separate steps (recommended for large datasets):
   python -m src.etl.pipeline --extract
   python -m src.etl.pipeline --process --batch-size 500
   python -m src.etl.pipeline --split
-
-  # Smoke test (first 20 admissions):
   python -m src.etl.pipeline --extract --process --sample 20 --split
-
-  # Resume after a crash:
   python -m src.etl.pipeline --process --resume
-
-  # Re-extract from scratch:
   python -m src.etl.pipeline --extract --force-extract
 """,
     )
 
-    # --- Pass 1 ---
-    parser.add_argument(
-        "--extract",
-        action="store_true",
-        default=False,
-        help="Pass 1: scan raw CSV.gz files and write Parquet intermediaries to data/intermediate/.",
-    )
-    parser.add_argument(
-        "--force-extract",
-        action="store_true",
-        default=False,
-        help="Re-write Parquet intermediaries even if they already exist (requires --extract).",
-    )
-
-    # --- Pass 2 ---
-    parser.add_argument(
-        "--process",
-        action="store_true",
-        default=False,
-        help="Pass 2: process Parquet intermediaries into data/processed/fhir_lite.jsonl.",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=50,
-        metavar="N",
-        help="HADM_IDs per batch during --process (default: 50).",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        default=False,
-        help="Skip admissions already present in the output JSONL (requires --process).",
-    )
-    parser.add_argument(
-        "--sample",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Limit --process to the first N admissions (for smoke tests; requires --process).",
-    )
-
-    # --- Pass 3 ---
-    parser.add_argument(
-        "--split",
-        action="store_true",
-        default=False,
-        help="Pass 3: partition fhir_lite.jsonl into patient-level train/val/test splits.",
-    )
-    parser.add_argument(
-        "--split-input",
-        type=Path,
-        default=OUTPUT_PATH,
-        metavar="PATH",
-        help="JSONL file to split (default: data/processed/fhir_lite.jsonl).",
-    )
-    parser.add_argument(
-        "--train-frac",
-        type=float,
-        default=0.70,
-        metavar="F",
-        help="Fraction of patients in training split (default: 0.70).",
-    )
-    parser.add_argument(
-        "--val-frac",
-        type=float,
-        default=0.15,
-        metavar="F",
-        help="Fraction of patients in validation split (default: 0.15).",
-    )
-    parser.add_argument(
-        "--split-seed",
-        type=int,
-        default=42,
-        metavar="N",
-        help="Random seed for patient shuffling (default: 42).",
-    )
-
-    # --- Utilities ---
-    parser.add_argument(
-        "--download-resources",
-        action="store_true",
-        default=False,
-        help="Download itemid_to_variable_map.csv and variable_ranges.csv from MIMIC-Extract.",
-    )
-    parser.add_argument(
-        "--force-download",
-        action="store_true",
-        default=False,
-        help="Re-download MIMIC-Extract resources even if they already exist.",
-    )
+    parser.add_argument("--extract", action="store_true", default=False,
+        help="Pass 1: scan raw CSV.gz files and write Parquet intermediaries.")
+    parser.add_argument("--force-extract", action="store_true", default=False,
+        help="Re-write Parquet intermediaries even if they already exist (requires --extract).")
+    parser.add_argument("--process", action="store_true", default=False,
+        help="Pass 2: process Parquet intermediaries into data/processed/fhir_lite.jsonl.")
+    parser.add_argument("--batch-size", type=int, default=50, metavar="N",
+        help="HADM_IDs per batch during --process (default: 50).")
+    parser.add_argument("--resume", action="store_true", default=False,
+        help="Skip admissions already present in the output JSONL (requires --process).")
+    parser.add_argument("--sample", type=int, default=None, metavar="N",
+        help="Limit --process to the first N admissions (requires --process).")
+    parser.add_argument("--split", action="store_true", default=False,
+        help="Pass 3: partition fhir_lite.jsonl into patient-level train/val/test splits.")
+    parser.add_argument("--split-input", type=Path, default=OUTPUT_PATH, metavar="PATH",
+        help="JSONL file to split (default: data/processed/fhir_lite.jsonl).")
+    parser.add_argument("--train-frac", type=float, default=0.70, metavar="F",
+        help="Fraction of patients in training split (default: 0.70).")
+    parser.add_argument("--val-frac", type=float, default=0.15, metavar="F",
+        help="Fraction of patients in validation split (default: 0.15).")
+    parser.add_argument("--split-seed", type=int, default=42, metavar="N",
+        help="Random seed for patient shuffling (default: 42).")
+    parser.add_argument("--download-resources", action="store_true", default=False,
+        help="Download itemid_to_variable_map.csv and variable_ranges.csv from MIMIC-Extract.")
+    parser.add_argument("--force-download", action="store_true", default=False,
+        help="Re-download MIMIC-Extract resources even if they already exist.")
 
     args = parser.parse_args()
 
-    # Validation
     if args.force_extract and not args.extract:
         parser.error("--force-extract requires --extract")
     if args.resume and not args.process:

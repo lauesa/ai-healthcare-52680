@@ -1,0 +1,11 @@
+polars>=1.0.0
+torch>=2.4.0
+vllm>=0.5.0
+spacy>=3.7.0
+scispacy>=0.5.4
+nvidia-ml-py
+pandas<2.0.0
+rouge-score
+meteor
+pydantic>=2.0.0
+numpy>=1.26.4,<2.0.0
