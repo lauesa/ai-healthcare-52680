@@ -377,7 +377,7 @@ in principle.
 \midrule
 ROUGE-L            & \textbf{0.079} & 0.076 & $+$0.003 & $<$0.001$^*$ & 0.638 & draw \\
 Entity F1          & \textbf{0.059} & 0.054 & $+$0.005 & $<$0.001$^*$ & 0.610 & draw \\
-Entity F1 (drugs)  & 0.022 & \textbf{0.025} & $-$0.004 & 0.430 & 0.994 & n.s. \\
+Entity F1 (drugs)  & 0.022 & \textbf{0.025} & $-$0.003 & 0.430 & 0.994 & n.s. \\
 Entity F1 (vitals) & 0.058 & \textbf{0.074} & $-$0.016 & 0.017$^*$ & 0.975 & G3 \\
 AARP Score         & 0.000 & \textbf{0.025} & $-$0.024 & $<$0.001$^*$ & 0.999 & G3$^\dagger$ \\
 \bottomrule
@@ -391,7 +391,7 @@ AARP Score         & 0.000 & \textbf{0.025} & $-$0.024 & $<$0.001$^*$ & 0.999 & 
 Table~\ref{tab:abnormal} reports precision, recall, and F1 for identifying
 abnormal vital signs. All three metrics are significant. \gemma
 substantially outperforms \medgemma on recall ($\Delta = -0.119$, \sig),
-F1 ($\Delta = -0.056$, \sig), and precision ($\Delta = -0.030$, \sig).
+F1 ($\Delta = -0.056$, \sig), and precision ($\Delta = -0.029$, \sig).
 
 The Sub-task 2 metric counts a value as ``identified'' if its label appears
 in the generated text; it does not require the model to explicitly flag the
@@ -402,12 +402,13 @@ reflects greater verbosity rather than superior abnormal-value
 identification; a stricter re-scoring requiring explicit
 high/low flagging is left for future work.
 
-Figure~\ref{fig:heatmap} shows per-vital miss rates. \medgemma systematically
-misses Heart Rate (32\% miss rate) and Respiratory Rate (28\%); \gemma
-reduces these miss rates to 1\% and 3\% respectively. MAP remains difficult
-for both models (42\% MedGemma, 50\% Gemma-3), possibly because mean arterial
-pressure is a derived value that may not always appear as a direct
-\texttt{ITEMID} in CareVue.
+Figure~\ref{fig:heatmap} shows per-vital miss rates. \medgemma misses
+Heart Rate at 17\% versus 2\% for \gemma, and Respiratory Rate at 38\%
+versus 19\%. Oxygen saturation miss rates follow the same direction (31\%
+versus 9\%). Mean arterial pressure is near-equal for both models (19\%
+MedGemma, 22\% Gemma-3), possibly because mean arterial pressure is a
+derived value that may not always appear as a direct \texttt{ITEMID} in
+CareVue; \gemma shows no consistent advantage here.
 
 \begin{table}[t]
 \caption{Sub-task 2: Abnormal Value Identification ($n = 637$ pairs).
@@ -419,7 +420,7 @@ Bold = winning model per row; $*$ = $p < 0.05$ (uncorrected).}
 \textbf{Metric} & \textbf{MG} & \textbf{G3} & \textbf{$\Delta$} &
   \textbf{$p$} & \textbf{$r$} \\
 \midrule
-Precision & 0.370 & \textbf{0.400} & $-$0.030 & $<$0.001$^*$ & 0.805 \\
+Precision & 0.370 & \textbf{0.400} & $-$0.029 & $<$0.001$^*$ & 0.805 \\
 Recall    & 0.692 & \textbf{0.811} & $-$0.119 & $<$0.001$^*$ & 0.972 \\
 F1        & 0.453 & \textbf{0.509} & $-$0.056 & $<$0.001$^*$ & 0.828 \\
 \bottomrule
@@ -430,8 +431,10 @@ F1        & 0.453 & \textbf{0.509} & $-$0.056 & $<$0.001$^*$ & 0.828 \\
   \centering
   \includegraphics[width=\textwidth]{figures/academic/fig3_vital_heatmap.pdf}
   \caption{Per-vital miss rates for Sub-task~2. Darker cells indicate higher
-  miss rates. \medgemma misses Heart Rate, MAP, and Respiratory Rate at
-  notably higher rates than \gemma. MAP remains difficult for both models.}
+  miss rates. \medgemma misses Heart Rate (17\%), Respiratory Rate (38\%),
+  and Oxygen Saturation (31\%) at substantially higher rates than \gemma
+  (2\%, 19\%, and 9\% respectively). MAP miss rates are comparable between
+  models (19\% MedGemma, 22\% Gemma-3).}
   \label{fig:heatmap}
 \end{figure*}
 
